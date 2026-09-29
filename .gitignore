@@ -1,0 +1,5 @@
+/vendor/
+/.env
+/storage/logs/*
+!.gitkeep
+/storage/keys/*.pem
