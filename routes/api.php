@@ -17,6 +17,9 @@ use Sibs\KronosApi\Controller\DobRecordController;
 use Sibs\KronosApi\Controller\DtrPublishController;
 use Sibs\KronosApi\Controller\EmployeeAccountAssignmentController;
 use Sibs\KronosApi\Controller\EmployeeController;
+use Sibs\KronosApi\Controller\EmployeeDirectoryController;
+use Sibs\KronosApi\Controller\EmployeeRelationshipController;
+use Sibs\KronosApi\Controller\IndividualResourceController;
 use Sibs\KronosApi\Controller\UserController;
 use Sibs\KronosApi\Database\Database;
 use Sibs\KronosApi\Environment;
@@ -31,7 +34,10 @@ use Sibs\KronosApi\Repository\DepartmentRepository;
 use Sibs\KronosApi\Repository\DobRecordRepository;
 use Sibs\KronosApi\Repository\DtrPublishRepository;
 use Sibs\KronosApi\Repository\EmployeeAccountAssignmentRepository;
+use Sibs\KronosApi\Repository\EmployeeDirectoryRepository;
+use Sibs\KronosApi\Repository\EmployeeRelationshipRepository;
 use Sibs\KronosApi\Repository\EmployeeRepository;
+use Sibs\KronosApi\Repository\IndividualResourceRepository;
 use Sibs\KronosApi\Repository\UserRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
@@ -53,7 +59,10 @@ return function (
     ?\Closure $dtrPublishRepositoryFactory = null,
     ?\Closure $announcementRepositoryFactory = null,
     ?\Closure $confirmationRepositoryFactory = null,
-    ?\Closure $batchTableRepositoryFactory = null
+    ?\Closure $batchTableRepositoryFactory = null,
+    ?\Closure $employeeDirectoryRepositoryFactory = null,
+    ?\Closure $employeeRelationshipRepositoryFactory = null,
+    ?\Closure $individualResourceRepositoryFactory = null
 ): void {
 
     $serviceFactory ??= static fn (): ApiClientService => new ApiClientService(
@@ -216,6 +225,45 @@ return function (
         $configuration
     );
 
+    $employeeDirectoryRepositoryFactory ??= static fn (): EmployeeDirectoryRepository => new EmployeeDirectoryRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'),
+            'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'),
+            'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $employeeDirectoryController = new EmployeeDirectoryController(
+        $employeeDirectoryRepositoryFactory
+    );
+
+    $employeeRelationshipRepositoryFactory ??= static fn (): EmployeeRelationshipRepository => new EmployeeRelationshipRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'),
+            'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'),
+            'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $employeeRelationshipController = new EmployeeRelationshipController(
+        $employeeRelationshipRepositoryFactory
+    );
+
+    $individualResourceRepositoryFactory ??= static fn (): IndividualResourceRepository => new IndividualResourceRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'),
+            'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'),
+            'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $individualResourceController = new IndividualResourceController(
+        $individualResourceRepositoryFactory
+    );
+
     $app->post(
         '/api/v1/api-clients',
         [$apiClientController, 'create']
@@ -250,6 +298,14 @@ return function (
     ));
 
     $app->get(
+        '/api/v1/employee-directory',
+        [$employeeDirectoryController, 'index']
+    )->add(new JwtAuthMiddleware(
+        $jwtService,
+        $app->getResponseFactory()
+    ));
+
+    $app->get(
         '/api/v1/users',
         [$userController, 'index']
     )->add(new JwtAuthMiddleware(
@@ -272,6 +328,40 @@ return function (
         $jwtService,
         $app->getResponseFactory()
     ));
+
+    $individualResourceRoutes = [
+        ['/api/v1/employees/{gy_emp_code}', 'employee'],
+        ['/api/v1/accounts/{gy_acc_id}', 'account'],
+        ['/api/v1/departments/{id_department}', 'department'],
+        ['/api/v1/users/{gy_emp_code}', 'user'],
+    ];
+
+    foreach ($individualResourceRoutes as [$path, $method]) {
+        $app->get($path, [$individualResourceController, $method])
+            ->add(new JwtAuthMiddleware(
+                $jwtService,
+                $app->getResponseFactory()
+            ));
+    }
+
+    $relationshipRoutes = [
+        ['/api/v1/employees/{employeeCode}/account', 'employeeAccount'],
+        ['/api/v1/employees/{employeeCode}/department', 'employeeDepartment'],
+        ['/api/v1/employees/{employeeCode}/user', 'employeeUser'],
+        ['/api/v1/accounts/{accountId}/employees', 'accountEmployees'],
+        ['/api/v1/accounts/{accountId}/department', 'accountDepartment'],
+        ['/api/v1/departments/{departmentId}/accounts', 'departmentAccounts'],
+        ['/api/v1/departments/{departmentId}/employees', 'departmentEmployees'],
+        ['/api/v1/users/{employeeCode}/employee', 'userEmployee'],
+    ];
+
+    foreach ($relationshipRoutes as [$path, $method]) {
+        $app->get($path, [$employeeRelationshipController, $method])
+            ->add(new JwtAuthMiddleware(
+                $jwtService,
+                $app->getResponseFactory()
+            ));
+    }
 
     $app->get(
         '/api/v1/assign-timesheet',
