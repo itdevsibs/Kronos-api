@@ -19,6 +19,9 @@ use Sibs\KronosApi\Controller\DobRecordController;
 use Sibs\KronosApi\Controller\DtrPublishController;
 use Sibs\KronosApi\Controller\EmployeeAccountAssignmentController;
 use Sibs\KronosApi\Controller\EmployeeController;
+use Sibs\KronosApi\Controller\EmployeeDirectoryController;
+use Sibs\KronosApi\Controller\EmployeeRelationshipController;
+use Sibs\KronosApi\Controller\IndividualResourceController;
 use Sibs\KronosApi\Controller\UserController;
 use Sibs\KronosApi\Config\BatchTableConfig;
 use Sibs\KronosApi\Database\Database;
@@ -38,7 +41,10 @@ use Sibs\KronosApi\Repository\DobRecordRepository;
 use Sibs\KronosApi\Repository\DtrPublishRepository;
 use Sibs\KronosApi\Repository\EmployeeAccountAssignmentRepository;
 use Sibs\KronosApi\Repository\EmployeeRepository;
+use Sibs\KronosApi\Repository\EmployeeDirectoryRepository;
+use Sibs\KronosApi\Repository\EmployeeRelationshipRepository;
 use Sibs\KronosApi\Repository\UserRepository;
+use Sibs\KronosApi\Repository\IndividualResourceRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
 use Sibs\KronosApi\Service\JwtService;
@@ -119,6 +125,70 @@ final class RecordingPdoStatement extends PDOStatement
     public function fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array
     {
         return $this->pdo->fetchAllResult;
+    }
+}
+
+final class EmployeeDirectoryRecordingPdo extends PDO
+{
+    /** @var list<string> */
+    public array $queries = [];
+
+    /** @var array<int, array<string, array{value: mixed, type: int}>> */
+    public array $bindings = [];
+
+    /** @var array<int, array<string, mixed>|false> */
+    public array $fetchResults = [];
+
+    /** @var array<int, list<array<string, mixed>>> */
+    public array $fetchAllResults = [];
+
+    public function __construct()
+    {
+    }
+
+    public function prepare(string $query, array $options = []): PDOStatement|false
+    {
+        $index = count($this->queries);
+        $this->queries[] = $query;
+
+        return new EmployeeDirectoryRecordingPdoStatement($this, $index);
+    }
+}
+
+final class EmployeeDirectoryRecordingPdoStatement extends PDOStatement
+{
+    public function __construct(
+        private readonly EmployeeDirectoryRecordingPdo $pdo,
+        private readonly int $index
+    ) {
+    }
+
+    public function bindValue(string|int $param, mixed $value, int $type = PDO::PARAM_STR): bool
+    {
+        $this->pdo->bindings[$this->index][(string) $param] = [
+            'value' => $value,
+            'type' => $type,
+        ];
+
+        return true;
+    }
+
+    public function execute(?array $params = null): bool
+    {
+        return true;
+    }
+
+    public function fetch(
+        int $mode = PDO::FETCH_DEFAULT,
+        int $cursorOrientation = PDO::FETCH_ORI_NEXT,
+        int $cursorOffset = 0
+    ): mixed {
+        return $this->pdo->fetchResults[$this->index] ?? false;
+    }
+
+    public function fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array
+    {
+        return $this->pdo->fetchAllResults[$this->index] ?? [];
     }
 }
 
@@ -2773,4 +2843,820 @@ test('all configured batch routes require JWT before creating repositories', fun
     );
     assertTrue(!in_array('/api/v1/qds-notifications', $patterns, true), 'Unsafe qds-notifications route was registered.');
     assertTrue(!in_array('/api/v1/sibs-accounts', $patterns, true), 'Missing DB1 sibs-accounts route was registered.');
+});
+
+test('employee directory repository executes one count and one paginated explicit join query', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 31];
+    $pdo->fetchAllResults[1] = [[
+        'sibsId' => 'SIBS-001',
+        'firstName' => 'Juan',
+        'middleName' => 'Santos',
+        'lastName' => 'Cruz',
+        'email' => 'juan@example.test',
+        'gender' => 'Male',
+        'birthdate' => '1990-01-01',
+        'civilStatus' => 'Single',
+        'contact' => '09170000000',
+        'hireDate' => '2020-01-01',
+        'gy_assignedloc' => 1,
+        'site' => 'Davao',
+        'nhodate' => '2020-02-01',
+        'account' => 'Example Account',
+        'accountId' => 12,
+        'departmentId' => 5,
+        'department' => 'Operations',
+        'accountManagerSibsId' => 'SIBS-099',
+        'accountManagerFirstName' => 'Maria',
+        'accountManagerMiddleName' => '',
+        'accountManagerLastName' => 'Reyes',
+        'userFullName' => 'Juan Santos Cruz',
+        'userType' => 0,
+        'userStatus' => 0,
+    ]];
+    $repository = new EmployeeDirectoryRepository($pdo);
+
+    $result = $repository->findPage(2, 15, null, null, []);
+
+    assertSameValue(2, count($pdo->queries), 'Employee directory must execute exactly two queries.');
+    assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total FROM gy_employee e '), 'Count query is not explicit or uses the wrong base table.');
+    assertTrue(str_contains($pdo->queries[0], 'INNER JOIN gy_user u ON TRIM(u.gy_user_code) = TRIM(e.gy_emp_code)'), 'Employee-user join is incorrect.');
+    assertTrue(str_contains($pdo->queries[0], 'INNER JOIN gy_accounts a ON e.gy_acc_id = a.gy_acc_id'), 'Employee-account join is incorrect.');
+    assertTrue(str_contains($pdo->queries[0], 'LEFT JOIN gy_department d ON a.gy_dept_id = d.id_department'), 'Account-department join is incorrect.');
+    assertTrue(str_contains($pdo->queries[0], 'LEFT JOIN gy_user managerUser ON e.gy_emp_supervisor = managerUser.gy_user_id'), 'Supervisor-manager join is incorrect.');
+    assertTrue(str_contains($pdo->queries[0], 'LEFT JOIN gy_employee managerEmployee ON TRIM(managerEmployee.gy_emp_code) = TRIM(managerUser.gy_user_code)'), 'Manager employee join is incorrect.');
+    assertTrue(str_contains($pdo->queries[0], 'WHERE u.gy_user_status = 0 AND a.gy_acc_status = 0'), 'Required active filters are missing.');
+
+    $dataSql = $pdo->queries[1];
+    assertTrue(!str_contains(strtoupper($dataSql), 'SELECT *'), 'Employee directory used SELECT *.');
+    foreach ([
+        'AS sibsId',
+        'AS firstName',
+        'AS middleName',
+        'AS lastName',
+        'AS email',
+        'AS gender',
+        'AS birthdate',
+        'AS civilStatus',
+        'AS contact',
+        'AS hireDate',
+        'AS gy_assignedloc',
+        'AS site',
+        'AS nhodate',
+        'AS accountId',
+        'AS account',
+        'AS departmentId',
+        'AS department',
+        'AS userFullName',
+        'AS userType',
+        'AS userStatus',
+        'AS accountManagerSibsId',
+        'AS accountManagerFirstName',
+        'AS accountManagerMiddleName',
+        'AS accountManagerLastName',
+    ] as $alias) {
+        assertTrue(str_contains($dataSql, $alias), 'Employee directory omitted explicit output ' . $alias . '.');
+    }
+    $projection = substr($dataSql, 0, strpos($dataSql, ' FROM '));
+    foreach ([
+        'u.gy_user_id',
+        'u.gy_user_code',
+        'u.gy_username',
+        'u.ghl_contact_id',
+        'u.gy_user_function',
+        'u.gy_head_code',
+        'u.gy_script_code',
+        'AS userId',
+    ] as $forbiddenProjection) {
+        assertTrue(!str_contains($projection, $forbiddenProjection), 'Employee directory exposed ' . $forbiddenProjection . '.');
+    }
+    assertTrue(str_contains($dataSql, "WHEN TRIM(CAST(e.gy_assignedloc AS CHAR)) = '3' THEN 'Hybrid'"), 'Site mapping is incomplete.');
+    assertTrue(str_contains($dataSql, "COALESCE(NULLIF(TRIM(a.gy_acc_name), ''), NULLIF(TRIM(e.gy_emp_account), ''), NULLIF(TRIM(a.gy_acc_ghl_name), '')) AS account"), 'Account precedence is incorrect.');
+    assertTrue(str_contains($dataSql, 'ORDER BY u.gy_user_id DESC LIMIT :limit OFFSET :offset'), 'Default sorting or pagination is incorrect.');
+    assertSameValue([
+        ':limit' => ['value' => 15, 'type' => PDO::PARAM_INT],
+        ':offset' => ['value' => 15, 'type' => PDO::PARAM_INT],
+    ], $pdo->bindings[1] ?? [], 'Pagination values were not safely bound.');
+    assertSameValue(['data' => $pdo->fetchAllResults[1], 'total' => 31], $result, 'Repository returned the wrong directory page.');
+});
+
+test('employee directory repository safely applies search department and account filters', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 2];
+    $repository = new EmployeeDirectoryRepository($pdo);
+
+    $repository->findPage(1, 20, 'juan', 5, [12, 15, 18]);
+
+    foreach ($pdo->queries as $query) {
+        assertTrue(str_contains($query, 'a.gy_dept_id = :department_id'), 'Department filter is missing.');
+        assertTrue(str_contains($query, 'a.gy_acc_id IN (:account_id_0, :account_id_1, :account_id_2)'), 'Account filter placeholders are unsafe or incorrect.');
+        assertTrue(!str_contains($query, 'juan'), 'Raw search input was embedded in SQL.');
+        assertTrue(!str_contains($query, '12, 15, 18'), 'Raw account IDs were embedded in SQL.');
+        assertTrue(str_contains($query, 'managerEmployee.gy_emp_lname LIKE :search_filter_12'), 'Manager search field is missing.');
+        assertTrue(str_contains($query, "THEN 'Both Tagum and Davao'"), 'Site text search mapping is missing.');
+    }
+    assertTrue(str_contains($pdo->queries[1], 'CASE WHEN e.gy_emp_fname LIKE :search_rank_0'), 'Search prioritization is missing.');
+    assertTrue(str_contains($pdo->queries[1], 'END ASC, u.gy_user_id DESC'), 'Search ordering is incorrect.');
+    assertSameValue(['value' => 5, 'type' => PDO::PARAM_INT], $pdo->bindings[0][':department_id'] ?? null, 'Department filter was not bound as an integer.');
+    assertSameValue(['value' => 12, 'type' => PDO::PARAM_INT], $pdo->bindings[0][':account_id_0'] ?? null, 'First account filter was not bound safely.');
+    assertSameValue(['value' => 18, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':account_id_2'] ?? null, 'Last account filter was not bound safely.');
+    assertSameValue(['value' => '%juan%', 'type' => PDO::PARAM_STR], $pdo->bindings[0][':search_filter_0'] ?? null, 'Search filter was not bound safely.');
+    assertSameValue(['value' => '%juan%', 'type' => PDO::PARAM_STR], $pdo->bindings[1][':search_rank_4'] ?? null, 'Search ranking was not bound safely.');
+});
+
+test('employee directory controller returns numbered pagination with defaults', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 31];
+    $pdo->fetchAllResults[1] = [[
+        'sibsId' => 'SIBS-001',
+        'userFullName' => 'Juan Santos Cruz',
+        'userType' => 0,
+        'userStatus' => 0,
+    ]];
+    $controller = new EmployeeDirectoryController(
+        static fn (): EmployeeDirectoryRepository => new EmployeeDirectoryRepository($pdo)
+    );
+
+    $response = $controller->index(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-directory'),
+        (new ResponseFactory())->createResponse()
+    );
+    $payload = responseJson($response);
+
+    assertSameValue(200, $response->getStatusCode(), 'Employee directory returned the wrong status.');
+    assertSameValue('private, no-store', $response->getHeaderLine('Cache-Control'), 'Employee directory response can be cached.');
+    assertSameValue($pdo->fetchAllResults[1], $payload['data'], 'Employee directory returned the wrong rows.');
+    assertSameValue([
+        'currentPage' => 1,
+        'totalPages' => 3,
+        'total' => 31,
+        'limit' => 15,
+    ], $payload['pagination'], 'Employee directory default pagination is incorrect.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, 'Default directory limit is incorrect.');
+    assertSameValue(['value' => 0, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, 'Default directory offset is incorrect.');
+});
+
+test('employee directory controller normalizes paging and parses combined filters', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 201];
+    $controller = new EmployeeDirectoryController(
+        static fn (): EmployeeDirectoryRepository => new EmployeeDirectoryRepository($pdo)
+    );
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-directory')
+        ->withQueryParams([
+            'page' => '-4',
+            'limit' => '999',
+            'search' => '  juan  ',
+            'department_id' => '5',
+            'account_ids' => '12, 15,12',
+        ]);
+
+    $payload = responseJson($controller->index($request, (new ResponseFactory())->createResponse()));
+
+    assertSameValue([
+        'currentPage' => 1,
+        'totalPages' => 3,
+        'total' => 201,
+        'limit' => 100,
+    ], $payload['pagination'], 'Employee directory did not normalize page or cap limit.');
+    assertTrue(str_contains($pdo->queries[0], 'a.gy_acc_id IN (:account_id_0, :account_id_1)'), 'Account IDs were not parsed and deduplicated.');
+    assertSameValue(['value' => 5, 'type' => PDO::PARAM_INT], $pdo->bindings[0][':department_id'] ?? null, 'Department query value was not parsed.');
+    assertSameValue(['value' => 12, 'type' => PDO::PARAM_INT], $pdo->bindings[0][':account_id_0'] ?? null, 'First account ID was not parsed.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[0][':account_id_1'] ?? null, 'Second account ID was not parsed.');
+    assertSameValue(['value' => '%juan%', 'type' => PDO::PARAM_STR], $pdo->bindings[0][':search_filter_0'] ?? null, 'Search text was not trimmed.');
+});
+
+test('employee directory controller normalizes pages whose offset would overflow', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 1];
+    $controller = new EmployeeDirectoryController(
+        static fn (): EmployeeDirectoryRepository => new EmployeeDirectoryRepository($pdo)
+    );
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-directory')
+        ->withQueryParams([
+            'page' => (string) PHP_INT_MAX,
+            'limit' => '100',
+        ]);
+
+    $payload = responseJson($controller->index($request, (new ResponseFactory())->createResponse()));
+
+    assertSameValue(1, $payload['pagination']['currentPage'], 'Overflowing directory page was not normalized.');
+    assertSameValue(['value' => 0, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, 'Overflowing directory offset reached PDO.');
+});
+
+test('employee directory controller rejects invalid filters safely', function (): void {
+    $cases = [
+        ['department_id' => 'not-an-id'],
+        ['department_id' => '0'],
+        ['account_ids' => '12,bad'],
+        ['account_ids' => '12,,15'],
+        ['account_ids' => ['12', '15']],
+        ['search' => ['juan']],
+    ];
+
+    foreach ($cases as $query) {
+        $repositoryCreated = false;
+        $controller = new EmployeeDirectoryController(
+            static function () use (&$repositoryCreated): EmployeeDirectoryRepository {
+                $repositoryCreated = true;
+                return new EmployeeDirectoryRepository(new EmployeeDirectoryRecordingPdo());
+            }
+        );
+        $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-directory')
+            ->withQueryParams($query);
+        $response = $controller->index($request, (new ResponseFactory())->createResponse());
+
+        assertSameValue(400, $response->getStatusCode(), 'Invalid directory filter did not return HTTP 400.');
+        assertSameValue(['success' => false, 'message' => 'Invalid query parameters.'], responseJson($response), 'Directory validation exposed details.');
+        assertSameValue(false, $repositoryCreated, 'Directory repository was created for invalid input.');
+    }
+});
+
+test('employee directory controller logs unexpected failures and returns generic HTTP 500', function (): void {
+    $failure = new RuntimeException('sensitive database detail');
+    $loggedException = null;
+    $controller = new EmployeeDirectoryController(
+        static function () use ($failure): EmployeeDirectoryRepository {
+            throw $failure;
+        },
+        static function (Throwable $exception) use (&$loggedException): void {
+            $loggedException = $exception;
+        }
+    );
+    $response = $controller->index(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-directory'),
+        (new ResponseFactory())->createResponse()
+    );
+
+    assertSameValue(500, $response->getStatusCode(), 'Directory failure returned the wrong status.');
+    assertSameValue($failure, $loggedException, 'Directory failure was not logged server-side.');
+    assertSameValue(['success' => false, 'message' => 'Server error.'], responseJson($response), 'Directory failure details were exposed.');
+});
+
+test('employee directory route requires JWT before creating its repository', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService(
+        'kronos-api',
+        'kronos-api-clients',
+        3600,
+        $keys['private_path'],
+        $keys['public_path']
+    );
+    $token = $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 1];
+    $pdo->fetchAllResults[1] = [[
+        'sibsId' => 'SIBS-001',
+        'userFullName' => 'Juan Santos Cruz',
+        'userType' => 0,
+        'userStatus' => 0,
+    ]];
+    $repositoryCalls = 0;
+    $repositoryFactory = static function () use ($pdo, &$repositoryCalls): EmployeeDirectoryRepository {
+        $repositoryCalls++;
+        return new EmployeeDirectoryRepository($pdo);
+    };
+
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        employeeDirectoryRepositoryFactory: $repositoryFactory
+    );
+    $app->addRoutingMiddleware();
+    $request = (new ServerRequestFactory())->createServerRequest(
+        'GET',
+        '/api/v1/employee-directory?page=1&limit=15'
+    );
+
+    $unauthorizedResponse = $app->handle($request);
+    assertSameValue(401, $unauthorizedResponse->getStatusCode(), 'Employee directory route is not JWT protected.');
+    assertSameValue(0, $repositoryCalls, 'Employee directory repository was created before JWT authorization.');
+
+    $authorizedResponse = $app->handle(
+        $request->withHeader('Authorization', 'Bearer ' . $token)
+    );
+    assertSameValue(200, $authorizedResponse->getStatusCode(), 'Employee directory rejected a valid JWT.');
+    assertSameValue(1, $repositoryCalls, 'Employee directory repository was not created exactly once.');
+    assertSameValue([
+        'currentPage' => 1,
+        'totalPages' => 1,
+        'total' => 1,
+        'limit' => 15,
+    ], responseJson($authorizedResponse)['pagination'], 'Employee directory route returned the wrong pagination.');
+});
+
+test('employee relationship repository resolves each single relationship with one explicit prepared query', function (): void {
+    $cases = [
+        ['findAccountByEmployeeCode', 'test1', ':employee_code', 'TRIM(e.gy_emp_code) = :employee_code', 'gy_acc_id', PDO::PARAM_STR],
+        ['findDepartmentByEmployeeCode', 'test1', ':employee_code', 'TRIM(e.gy_emp_code) = :employee_code', 'id_department', PDO::PARAM_STR],
+        ['findUserByEmployeeCode', 'test1', ':employee_code', 'TRIM(e.gy_emp_code) = :employee_code', 'gy_user_id', PDO::PARAM_STR],
+        ['findEmployeeByUserCode', 'test1', ':employee_code', 'TRIM(u.gy_user_code) = :employee_code', 'gy_emp_id', PDO::PARAM_STR],
+        ['findDepartmentByAccount', 13, ':account_id', 'FROM gy_accounts a LEFT JOIN gy_department d', 'id_department', PDO::PARAM_INT],
+    ];
+
+    foreach ($cases as [$method, $identifier, $placeholder, $join, $relatedKey, $parameterType]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 7, $relatedKey => 91, 'name_department' => 'Operations'];
+        $result = (new EmployeeRelationshipRepository($pdo))->{$method}($identifier);
+
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong relationship join.");
+        assertSameValue(['value' => $identifier, 'type' => $parameterType], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier safely.");
+        assertSameValue(true, $result['parent_exists'], "{$method} lost the parent marker.");
+        assertTrue(!array_key_exists('_parent_id', $result['data'] ?? []), "{$method} exposed its internal parent marker.");
+        assertSameValue(91, $result['data'][$relatedKey] ?? null, "{$method} returned the wrong related resource.");
+    }
+});
+
+test('employee relationship repository distinguishes a missing parent from a missing related resource', function (): void {
+    $missingParentPdo = new RecordingPdo();
+    $missingParentPdo->fetchResult = false;
+    $missingParent = (new EmployeeRelationshipRepository($missingParentPdo))->findAccountByEmployeeCode('missing-code');
+
+    assertSameValue(['parent_exists' => false, 'data' => null], $missingParent, 'Missing employee was not distinguished.');
+
+    $missingRelatedPdo = new RecordingPdo();
+    $missingRelatedPdo->fetchResult = ['_parent_id' => 7, 'gy_acc_id' => null, 'gy_acc_name' => null];
+    $missingRelated = (new EmployeeRelationshipRepository($missingRelatedPdo))->findAccountByEmployeeCode('test1');
+
+    assertSameValue(['parent_exists' => true, 'data' => null], $missingRelated, 'Missing employee account was not distinguished.');
+});
+
+test('employee relationship repository projections exactly match existing resource allowlists', function (): void {
+    $employeeFields = [
+        'gy_emp_id', 'gy_emp_code', 'gy_emp_type', 'gy_emp_schedtype', 'gy_emp_rate',
+        'gy_emp_email', 'gy_emp_lname', 'gy_emp_fname', 'gy_emp_mname', 'gy_emp_fullname',
+        'gy_acc_id', 'gy_emp_account', 'gy_emp_supervisor', 'gy_emp_om', 'gy_emp_leave_credits',
+        'gy_emp_hiredate', 'gy_emp_lastedit', 'gy_lastedit_by', 'gy_work_from', 'gy_gender',
+        'gy_dob', 'gy_civilstatus', 'gy_assignedloc', 'gy_tagumdate', 'gy_davaodate',
+        'gy_hybriddate', 'gy_accjoin', 'gy_nhodate', 'gy_fststartdate', 'gy_fstenddate',
+        'gy_pststartdate', 'gy_pstenddate', 'gy_certification', 'gy_gradbaystartdate',
+        'gy_gradbayenddate', 'gy_fullgolivedate', 'gy_promotiondate', 'gy_projempdate',
+        'gy_probempdate', 'gy_regempdate', 'gy_last_working_day',
+    ];
+    $accountFields = ['gy_acc_id', 'gy_acc_name', 'gy_acc_ghl_name', 'gy_dept_id', 'gy_acc_status'];
+    $departmentFields = ['id_department', 'name_department'];
+    $userFields = [
+        'gy_user_id', 'gy_user_code', 'ghl_contact_id', 'gy_full_name', 'gy_username',
+        'gy_user_type', 'gy_user_function', 'gy_head_code', 'gy_script_code', 'gy_user_status',
+    ];
+    $cases = [
+        ['findAccountByEmployeeCode', ['test1'], $accountFields],
+        ['findDepartmentByEmployeeCode', ['test1'], $departmentFields],
+        ['findUserByEmployeeCode', ['test1'], $userFields],
+        ['findEmployeeByUserCode', ['test1'], $employeeFields],
+        ['findDepartmentByAccount', [12], $departmentFields],
+        ['findEmployeesByAccount', [12, 0], $employeeFields],
+        ['findAccountsByDepartment', [5, 0], $accountFields],
+        ['findEmployeesByDepartment', [5, 0], $employeeFields],
+    ];
+
+    foreach ($cases as [$method, $arguments, $expectedFields]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = false;
+        $pdo->fetchAllResult = [];
+        (new EmployeeRelationshipRepository($pdo))->{$method}(...$arguments);
+        $query = (string) $pdo->query;
+        $fromPosition = strpos($query, ' FROM ');
+        assertTrue($fromPosition !== false, "{$method} query has no FROM clause.");
+        $projection = substr($query, strlen('SELECT '), $fromPosition - strlen('SELECT '));
+        $selectedFields = array_slice(explode(', ', $projection), 1);
+        $selectedFields = array_map(
+            static fn (string $field): string => substr($field, strpos($field, '.') + 1),
+            $selectedFields
+        );
+
+        assertSameValue($expectedFields, $selectedFields, "{$method} projection changed its resource allowlist.");
+    }
+});
+
+test('employee relationship repository collections use one 101-row cursor query and preserve empty parents', function (): void {
+    $cases = [
+        ['findEmployeesByAccount', 12, 100, ':account_id', 'gy_emp_id', 'FROM gy_accounts a LEFT JOIN gy_employee e'],
+        ['findAccountsByDepartment', 5, 100, ':department_id', 'gy_acc_id', 'FROM gy_department d LEFT JOIN gy_accounts a'],
+        ['findEmployeesByDepartment', 5, 100, ':department_id', 'gy_emp_id', 'FROM gy_department d LEFT JOIN'],
+    ];
+
+    foreach ($cases as [$method, $parentId, $afterId, $parentPlaceholder, $cursorKey, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => $parentId, $cursorKey => 137]];
+        $result = (new EmployeeRelationshipRepository($pdo))->{$method}($parentId, $afterId);
+
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong parent relationship.");
+        assertTrue(str_contains((string) $pdo->query, "{$cursorKey} > :after_id"), "{$method} omitted keyset pagination.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not request the look-ahead row.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), ' OFFSET '), "{$method} used OFFSET pagination.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'COUNT('), "{$method} issued a count query.");
+        assertSameValue(['value' => $parentId, 'type' => PDO::PARAM_INT], $pdo->boundValues[$parentPlaceholder] ?? null, "{$method} did not bind the parent ID.");
+        assertSameValue(['value' => $afterId, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind the cursor.");
+        assertSameValue([[$cursorKey => 137]], $result['data'], "{$method} exposed internal fields or changed rows.");
+    }
+
+    $emptyPdo = new RecordingPdo();
+    $emptyPdo->fetchAllResult = [['_parent_id' => 12, 'gy_emp_id' => null]];
+    $empty = (new EmployeeRelationshipRepository($emptyPdo))->findEmployeesByAccount(12, 0);
+    assertSameValue(['parent_exists' => true, 'data' => []], $empty, 'Existing account with no employees was not preserved.');
+});
+
+test('employee relationship controller returns compact single-resource success and distinct 404 responses', function (): void {
+    $successPdo = new RecordingPdo();
+    $successPdo->fetchResult = [
+        '_parent_id' => 7,
+        'gy_acc_id' => 12,
+        'gy_acc_name' => 'Example',
+        'gy_acc_ghl_name' => 'Example GHL',
+        'gy_dept_id' => 5,
+        'gy_acc_status' => 0,
+    ];
+    $controller = new EmployeeRelationshipController(
+        static fn (): EmployeeRelationshipRepository => new EmployeeRelationshipRepository($successPdo)
+    );
+    $response = $controller->employeeAccount(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employees/test1/account'),
+        (new ResponseFactory())->createResponse(),
+        ['employeeCode' => '  test1  ']
+    );
+
+    assertSameValue(200, $response->getStatusCode(), 'Single relationship success returned the wrong status.');
+    assertSameValue([
+        'success' => true,
+        'data' => [
+            'gy_acc_id' => 12,
+            'gy_acc_name' => 'Example',
+            'gy_acc_ghl_name' => 'Example GHL',
+            'gy_dept_id' => 5,
+            'gy_acc_status' => 0,
+        ],
+    ], responseJson($response), 'Single relationship response was not compact.');
+    assertSameValue(
+        ['value' => 'test1', 'type' => PDO::PARAM_STR],
+        $successPdo->boundValues[':employee_code'] ?? null,
+        'Employee code was not trimmed and bound as a string.'
+    );
+
+    $missingParentPdo = new RecordingPdo();
+    $missingParentPdo->fetchResult = false;
+    $missingParentController = new EmployeeRelationshipController(
+        static fn (): EmployeeRelationshipRepository => new EmployeeRelationshipRepository($missingParentPdo)
+    );
+    $missingParentResponse = $missingParentController->employeeAccount(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employees/missing-code/account'),
+        (new ResponseFactory())->createResponse(),
+        ['employeeCode' => 'missing-code']
+    );
+    assertSameValue(404, $missingParentResponse->getStatusCode(), 'Missing parent did not return HTTP 404.');
+    assertSameValue(['success' => false, 'message' => 'Resource not found.'], responseJson($missingParentResponse), 'Missing parent response is incorrect.');
+
+    $missingRelatedPdo = new RecordingPdo();
+    $missingRelatedPdo->fetchResult = ['_parent_id' => 7, 'gy_acc_id' => null];
+    $missingRelatedController = new EmployeeRelationshipController(
+        static fn (): EmployeeRelationshipRepository => new EmployeeRelationshipRepository($missingRelatedPdo)
+    );
+    $missingRelatedResponse = $missingRelatedController->employeeAccount(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employees/test1/account'),
+        (new ResponseFactory())->createResponse(),
+        ['employeeCode' => 'test1']
+    );
+    assertSameValue(404, $missingRelatedResponse->getStatusCode(), 'Missing relationship did not return HTTP 404.');
+    assertSameValue(['success' => false, 'message' => 'Related resource not found.'], responseJson($missingRelatedResponse), 'Missing relationship response is incorrect.');
+});
+
+test('employee relationship controller uses the actual last ID for 100-row cursor pagination', function (): void {
+    $pdo = new RecordingPdo();
+    $pdo->fetchAllResult = [];
+    for ($index = 0; $index < 101; $index++) {
+        $pdo->fetchAllResult[] = [
+            '_parent_id' => 12,
+            'gy_emp_id' => 500 + ($index * 3),
+            'gy_emp_code' => 'SIBS-' . $index,
+        ];
+    }
+    $controller = new EmployeeRelationshipController(
+        static fn (): EmployeeRelationshipRepository => new EmployeeRelationshipRepository($pdo)
+    );
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/accounts/12/employees')
+        ->withQueryParams(['after_id' => '-5']);
+    $response = $controller->accountEmployees(
+        $request,
+        (new ResponseFactory())->createResponse(),
+        ['accountId' => '12']
+    );
+    $payload = responseJson($response);
+
+    assertSameValue(200, $response->getStatusCode(), 'Relationship collection returned the wrong status.');
+    assertSameValue(100, count($payload['data']), 'Relationship collection returned more than 100 rows.');
+    assertSameValue([
+        'limit' => 100,
+        'count' => 100,
+        'current_cursor' => 0,
+        'next_cursor' => 797,
+        'has_more' => true,
+    ], $payload['pagination'], 'Relationship cursor pagination is incorrect.');
+});
+
+test('employee relationship controller logs failures and returns only a generic server error', function (): void {
+    $failure = new RuntimeException('private relationship SQL');
+    $logged = null;
+    $controller = new EmployeeRelationshipController(
+        static function () use ($failure): EmployeeRelationshipRepository {
+            throw $failure;
+        },
+        static function (Throwable $exception) use (&$logged): void {
+            $logged = $exception;
+        }
+    );
+    $response = $controller->employeeAccount(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employees/test1/account'),
+        (new ResponseFactory())->createResponse(),
+        ['employeeCode' => 'test1']
+    );
+
+    assertSameValue(500, $response->getStatusCode(), 'Relationship failure returned the wrong status.');
+    assertSameValue($failure, $logged, 'Relationship failure was not logged.');
+    assertSameValue(['success' => false, 'message' => 'Server error.'], responseJson($response), 'Relationship error exposed details.');
+});
+
+test('all employee relationship routes require JWT before repository creation', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService(
+        'kronos-api',
+        'kronos-api-clients',
+        3600,
+        $keys['private_path'],
+        $keys['public_path']
+    );
+    $repositoryCalls = 0;
+    $recordingPdos = [];
+    $repositoryFactory = static function () use (&$repositoryCalls, &$recordingPdos): EmployeeRelationshipRepository {
+        $repositoryCalls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = [
+            '_parent_id' => 7,
+            'gy_acc_id' => 12,
+            'id_department' => 5,
+            'gy_user_id' => 11,
+            'gy_emp_id' => 7,
+        ];
+        $pdo->fetchAllResult = [[
+            '_parent_id' => 7,
+            'gy_acc_id' => 12,
+            'gy_emp_id' => 7,
+        ]];
+        $recordingPdos[] = $pdo;
+        return new EmployeeRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        employeeRelationshipRepositoryFactory: $repositoryFactory
+    );
+    $app->addRoutingMiddleware();
+
+    $routesUnderTest = [
+        ['/api/v1/employees/test1/account', 'WHERE TRIM(e.gy_emp_code) = :employee_code'],
+        ['/api/v1/employees/test1/department', 'WHERE TRIM(e.gy_emp_code) = :employee_code'],
+        ['/api/v1/employees/test1/user', 'WHERE TRIM(e.gy_emp_code) = :employee_code'],
+        ['/api/v1/accounts/12/employees', 'FROM gy_accounts a LEFT JOIN gy_employee e'],
+        ['/api/v1/accounts/12/department', 'FROM gy_accounts a LEFT JOIN gy_department d'],
+        ['/api/v1/departments/5/accounts', 'FROM gy_department d LEFT JOIN gy_accounts a'],
+        ['/api/v1/departments/5/employees', 'FROM gy_department d LEFT JOIN'],
+        ['/api/v1/users/test1/employee', 'WHERE TRIM(u.gy_user_code) = :employee_code'],
+    ];
+
+    foreach ($routesUnderTest as [$path]) {
+        $response = $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path));
+        assertSameValue(401, $response->getStatusCode(), "{$path} was not JWT protected.");
+    }
+    assertSameValue(0, $repositoryCalls, 'Relationship repository was created before JWT authorization.');
+
+    $authorization = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+
+    foreach ($routesUnderTest as $index => [$path, $expectedQueryFragment]) {
+        $authorized = (new ServerRequestFactory())
+            ->createServerRequest('GET', $path)
+            ->withHeader('Authorization', $authorization);
+        assertSameValue(200, $app->handle($authorized)->getStatusCode(), "Authorized {$path} request failed.");
+        assertTrue(
+            str_contains((string) ($recordingPdos[$index]->query ?? ''), $expectedQueryFragment),
+            "{$path} dispatched to the wrong relationship method."
+        );
+    }
+    assertSameValue(
+        ['value' => 'test1', 'type' => PDO::PARAM_STR],
+        $recordingPdos[7]->boundValues[':employee_code'] ?? null,
+        'User-to-employee route did not bind gy_emp_code as a string.'
+    );
+    assertSameValue(8, $repositoryCalls, 'Authorized relationship routes did not create one repository each.');
+});
+
+test('individual resource repository uses one exact explicit prepared query per lookup', function (): void {
+    $employeeFields = 'gy_emp_id, gy_emp_code, gy_emp_type, gy_emp_schedtype, gy_emp_rate, '
+        . 'gy_emp_email, gy_emp_lname, gy_emp_fname, gy_emp_mname, gy_emp_fullname, gy_acc_id, '
+        . 'gy_emp_account, gy_emp_supervisor, gy_emp_om, gy_emp_leave_credits, gy_emp_hiredate, '
+        . 'gy_emp_lastedit, gy_lastedit_by, gy_work_from, gy_gender, gy_dob, gy_civilstatus, '
+        . 'gy_assignedloc, gy_tagumdate, gy_davaodate, gy_hybriddate, gy_accjoin, gy_nhodate, '
+        . 'gy_fststartdate, gy_fstenddate, gy_pststartdate, gy_pstenddate, gy_certification, '
+        . 'gy_gradbaystartdate, gy_gradbayenddate, gy_fullgolivedate, gy_promotiondate, '
+        . 'gy_projempdate, gy_probempdate, gy_regempdate, gy_last_working_day';
+    $cases = [
+        [
+            'findEmployeeByCode',
+            'test1',
+            'SELECT ' . $employeeFields . ' FROM gy_employee '
+                . 'WHERE TRIM(gy_emp_code) = TRIM(:employee_code) LIMIT 1',
+            ':employee_code',
+            PDO::PARAM_STR,
+        ],
+        [
+            'findAccountById',
+            12,
+            'SELECT gy_acc_id, gy_acc_name, gy_acc_ghl_name, gy_dept_id, gy_acc_status '
+                . 'FROM gy_accounts WHERE gy_acc_id = :account_id LIMIT 1',
+            ':account_id',
+            PDO::PARAM_INT,
+        ],
+        [
+            'findDepartmentById',
+            5,
+            'SELECT id_department, name_department FROM gy_department '
+                . 'WHERE id_department = :department_id LIMIT 1',
+            ':department_id',
+            PDO::PARAM_INT,
+        ],
+        [
+            'findUserByEmployeeCode',
+            'test1',
+            'SELECT gy_user_id, gy_user_code, ghl_contact_id, gy_full_name, gy_username, '
+                . 'gy_user_type, gy_user_function, gy_head_code, gy_script_code, gy_user_status '
+                . 'FROM gy_user WHERE TRIM(gy_user_code) = TRIM(:employee_code) LIMIT 1',
+            ':employee_code',
+            PDO::PARAM_STR,
+        ],
+    ];
+
+    foreach ($cases as [$method, $identifier, $expectedQuery, $placeholder, $type]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 99];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($identifier);
+
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertSameValue($expectedQuery, $pdo->query, "{$method} changed its explicit field allowlist or lookup.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $identifier, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not safely bind its identifier.");
+        assertSameValue(['resource_id' => 99], $result, "{$method} returned the wrong row.");
+    }
+});
+
+test('individual resource controller returns one compact resource and normalizes employee codes', function (): void {
+    $cases = [
+        ['employee', ['gy_emp_code' => '  test1  '], ':employee_code', 'test1'],
+        ['account', ['gy_acc_id' => '12'], ':account_id', 12],
+        ['department', ['id_department' => '5'], ':department_id', 5],
+        ['user', ['gy_emp_code' => '  test1  '], ':employee_code', 'test1'],
+    ];
+
+    foreach ($cases as [$method, $arguments, $placeholder, $expectedValue]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 99];
+        $controller = new IndividualResourceController(
+            static fn (): IndividualResourceRepository => new IndividualResourceRepository($pdo)
+        );
+        $response = $controller->{$method}(
+            (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/resource/value'),
+            (new ResponseFactory())->createResponse(),
+            $arguments
+        );
+
+        assertSameValue(200, $response->getStatusCode(), "{$method} lookup returned the wrong status.");
+        assertSameValue(['success' => true, 'data' => ['resource_id' => 99]], responseJson($response), "{$method} lookup returned the wrong payload.");
+        assertSameValue($expectedValue, $pdo->boundValues[$placeholder]['value'] ?? null, "{$method} lookup did not normalize its identifier.");
+        assertSameValue('private, no-store', $response->getHeaderLine('Cache-Control'), "{$method} response can be cached.");
+    }
+});
+
+test('individual resource controller rejects invalid identifiers before creating a repository', function (): void {
+    $cases = [
+        ['employee', ['gy_emp_code' => '   ']],
+        ['employee', ['gy_emp_code' => '123456789012']],
+        ['account', ['gy_acc_id' => '0']],
+        ['account', ['gy_acc_id' => 'not-an-id']],
+        ['department', ['id_department' => '-1']],
+        ['user', ['gy_emp_code' => '']],
+    ];
+
+    foreach ($cases as [$method, $arguments]) {
+        $repositoryCreated = false;
+        $controller = new IndividualResourceController(
+            static function () use (&$repositoryCreated): IndividualResourceRepository {
+                $repositoryCreated = true;
+                return new IndividualResourceRepository(new RecordingPdo());
+            }
+        );
+        $response = $controller->{$method}(
+            (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/resource/invalid'),
+            (new ResponseFactory())->createResponse(),
+            $arguments
+        );
+
+        assertSameValue(400, $response->getStatusCode(), "{$method} accepted an invalid identifier.");
+        assertSameValue(['success' => false, 'message' => 'Invalid resource identifier.'], responseJson($response), "{$method} returned the wrong validation response.");
+        assertSameValue(false, $repositoryCreated, "{$method} created a repository before validation.");
+    }
+});
+
+test('individual resource controller returns sanitized 404 and logged 500 responses', function (): void {
+    $notFoundPdo = new RecordingPdo();
+    $notFoundPdo->fetchResult = false;
+    $notFoundController = new IndividualResourceController(
+        static fn (): IndividualResourceRepository => new IndividualResourceRepository($notFoundPdo)
+    );
+    $notFound = $notFoundController->employee(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employees/missing'),
+        (new ResponseFactory())->createResponse(),
+        ['gy_emp_code' => 'missing']
+    );
+    assertSameValue(404, $notFound->getStatusCode(), 'Missing individual resource did not return HTTP 404.');
+    assertSameValue(['success' => false, 'message' => 'Resource not found.'], responseJson($notFound), 'Missing resource response is incorrect.');
+
+    $failure = new RuntimeException('private individual lookup SQL');
+    $logged = null;
+    $failureController = new IndividualResourceController(
+        static function () use ($failure): IndividualResourceRepository {
+            throw $failure;
+        },
+        static function (Throwable $exception) use (&$logged): void {
+            $logged = $exception;
+        }
+    );
+    $serverError = $failureController->account(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/accounts/12'),
+        (new ResponseFactory())->createResponse(),
+        ['gy_acc_id' => '12']
+    );
+    assertSameValue(500, $serverError->getStatusCode(), 'Individual lookup failure returned the wrong status.');
+    assertSameValue($failure, $logged, 'Individual lookup failure was not logged.');
+    assertSameValue(['success' => false, 'message' => 'Server error.'], responseJson($serverError), 'Individual lookup exposed failure details.');
+});
+
+test('all individual resource routes require JWT and dispatch one lookup each', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService(
+        'kronos-api',
+        'kronos-api-clients',
+        3600,
+        $keys['private_path'],
+        $keys['public_path']
+    );
+    $repositoryCalls = 0;
+    $recordingPdos = [];
+    $repositoryFactory = static function () use (&$repositoryCalls, &$recordingPdos): IndividualResourceRepository {
+        $repositoryCalls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 99];
+        $recordingPdos[] = $pdo;
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        individualResourceRepositoryFactory: $repositoryFactory
+    );
+    $app->addRoutingMiddleware();
+    $routesUnderTest = [
+        ['/api/v1/employees/test1', 'FROM gy_employee'],
+        ['/api/v1/accounts/12', 'FROM gy_accounts'],
+        ['/api/v1/departments/5', 'FROM gy_department'],
+        ['/api/v1/users/test1', 'FROM gy_user'],
+    ];
+
+    foreach ($routesUnderTest as [$path]) {
+        $response = $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path));
+        assertSameValue(401, $response->getStatusCode(), "{$path} was not JWT protected.");
+    }
+    assertSameValue(0, $repositoryCalls, 'Individual repository was created before JWT authorization.');
+
+    $authorization = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($routesUnderTest as $index => [$path, $queryFragment]) {
+        $request = (new ServerRequestFactory())
+            ->createServerRequest('GET', $path)
+            ->withHeader('Authorization', $authorization);
+        $response = $app->handle($request);
+        assertSameValue(200, $response->getStatusCode(), "Authorized {$path} request failed.");
+        assertTrue(str_contains((string) ($recordingPdos[$index]->query ?? ''), $queryFragment), "{$path} dispatched to the wrong lookup.");
+    }
+    assertSameValue(4, $repositoryCalls, 'Individual routes did not create exactly one repository each.');
 });
