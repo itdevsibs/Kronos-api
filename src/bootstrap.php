@@ -33,7 +33,7 @@ $errorMiddleware->setDefaultErrorHandler(
         bool $logErrorDetails
     ) use ($app): ResponseInterface {
         $status = $exception instanceof HttpException
-            ? $exception->getStatusCode()
+            ? (int) $exception->getCode()
             : 500;
         $response = $app->getResponseFactory()->createResponse($status);
         $message = $status >= 500
