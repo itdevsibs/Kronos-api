@@ -139,6 +139,124 @@ final class EmployeeRelationshipController
         );
     }
 
+    /** @param array<string, string> $arguments */
+    public function employeeSchedules(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        array $arguments
+    ): ResponseInterface {
+        return $this->codeCollection($request, $response, $arguments['employeeCode'] ?? null, 'findSchedulesByEmployeeCode', 'gy_sched_id');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function employeeScheduleEscalations(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        array $arguments
+    ): ResponseInterface {
+        return $this->codeCollection($request, $response, $arguments['employeeCode'] ?? null, 'findScheduleEscalationsByEmployeeCode', 'gy_sched_esc_id');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleEscalationEmployee(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        array $arguments
+    ): ResponseInterface {
+        return $this->single($response, $arguments['scheduleEscalationId'] ?? null, 'findEmployeeByScheduleEscalationId');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function userScheduleRdRequests(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        array $arguments
+    ): ResponseInterface {
+        return $this->codeCollection($request, $response, $arguments['employeeCode'] ?? null, 'findScheduleRdRequestsByUserCode', 'gy_rd_id');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function userCreatedSchedules(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->codeCollection($request, $response, $arguments['gy_emp_code'] ?? null, 'findSchedulesCreatedByUserCode', 'gy_sched_id');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function userSubmittedScheduleEscalations(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->codeCollection($request, $response, $arguments['gy_emp_code'] ?? null, 'findSubmittedScheduleEscalationsByUserCode', 'gy_sched_esc_id');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function userReceivedScheduleEscalations(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->codeCollection($request, $response, $arguments['gy_emp_code'] ?? null, 'findReceivedScheduleEscalationsByUserCode', 'gy_sched_esc_id');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function userSupervisedScheduleEscalations(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->codeCollection($request, $response, $arguments['gy_emp_code'] ?? null, 'findSupervisedScheduleEscalationsByUserCode', 'gy_sched_esc_id');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleEmployee(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->single($response, $arguments['gy_sched_id'] ?? null, 'findEmployeeByScheduleId');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleCreatedByUser(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->single($response, $arguments['gy_sched_id'] ?? null, 'findCreatedByUserByScheduleId');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleEscalationRequestedByUser(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->single($response, $arguments['gy_sched_esc_id'] ?? null, 'findRequestedByUserByScheduleEscalationId');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleEscalationRequestedToUser(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->single($response, $arguments['gy_sched_esc_id'] ?? null, 'findRequestedToUserByScheduleEscalationId');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleEscalationSupervisorUser(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->single($response, $arguments['gy_sched_esc_id'] ?? null, 'findSupervisorUserByScheduleEscalationId');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleRdRequestTracker(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->single($response, $arguments['gy_rd_id'] ?? null, 'findTrackerByScheduleRdRequestId');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function scheduleRdRequestUser(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->single($response, $arguments['gy_rd_id'] ?? null, 'findUserByScheduleRdRequestId');
+    }
+
+    private function codeCollection(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        mixed $rawEmployeeCode,
+        string $repositoryMethod,
+        string $cursorColumn
+    ): ResponseInterface {
+        $employeeCode = $this->employeeCode($rawEmployeeCode);
+
+        if ($employeeCode === null) {
+            return $this->notFound($response, 'Resource not found.');
+        }
+
+        return $this->collectionResponse($request, $response, $employeeCode, $repositoryMethod, $cursorColumn);
+    }
+
     private function single(
         ResponseInterface $response,
         mixed $rawIdentifier,
@@ -186,10 +304,20 @@ final class EmployeeRelationshipController
             return $this->notFound($response, 'Resource not found.');
         }
 
+        return $this->collectionResponse($request, $response, $parentId, $repositoryMethod, $cursorColumn);
+    }
+
+    private function collectionResponse(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        int|string $parentIdentifier,
+        string $repositoryMethod,
+        string $cursorColumn
+    ): ResponseInterface {
         $afterId = $this->normalizeAfterId($request->getQueryParams()['after_id'] ?? 0);
 
         try {
-            $result = ($this->repositoryFactory)()->{$repositoryMethod}($parentId, $afterId);
+            $result = ($this->repositoryFactory)()->{$repositoryMethod}($parentIdentifier, $afterId);
 
             if (!$result['parent_exists']) {
                 return $this->notFound($response, 'Resource not found.');
