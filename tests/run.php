@@ -9,6 +9,8 @@ use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\RequestHandlerInterface;
 use Sibs\KronosApi\Controller\AccountController;
 use Sibs\KronosApi\Controller\AnnouncementController;
+use Sibs\KronosApi\Controller\AnnouncementRelationshipController;
+use Sibs\KronosApi\Controller\AnnouncementViewController;
 use Sibs\KronosApi\Controller\BatchTableController;
 use Sibs\KronosApi\Controller\ConfirmationController;
 use Sibs\KronosApi\Controller\ApiClientController;
@@ -17,12 +19,25 @@ use Sibs\KronosApi\Controller\CronSettingController;
 use Sibs\KronosApi\Controller\DepartmentController;
 use Sibs\KronosApi\Controller\DobRecordController;
 use Sibs\KronosApi\Controller\DtrPublishController;
+use Sibs\KronosApi\Controller\DtrRelationshipController;
+use Sibs\KronosApi\Controller\DtrViewController;
 use Sibs\KronosApi\Controller\EmployeeAccountAssignmentController;
 use Sibs\KronosApi\Controller\EmployeeController;
 use Sibs\KronosApi\Controller\EmployeeDirectoryController;
 use Sibs\KronosApi\Controller\EmployeeRelationshipController;
+use Sibs\KronosApi\Controller\EmployeeScheduleController;
 use Sibs\KronosApi\Controller\IndividualResourceController;
+use Sibs\KronosApi\Controller\HolidayRelationshipController;
+use Sibs\KronosApi\Controller\HolidayViewController;
+use Sibs\KronosApi\Controller\LeaveRelationshipController;
+use Sibs\KronosApi\Controller\LeaveViewController;
+use Sibs\KronosApi\Controller\QdsRelationshipController;
+use Sibs\KronosApi\Controller\QdsViewController;
+use Sibs\KronosApi\Controller\TeamToolRelationshipController;
+use Sibs\KronosApi\Controller\ToolRelationshipController;
 use Sibs\KronosApi\Controller\UserController;
+use Sibs\KronosApi\Controller\WorkforceRelationshipController;
+use Sibs\KronosApi\Controller\WorkforceViewController;
 use Sibs\KronosApi\Config\BatchTableConfig;
 use Sibs\KronosApi\Database\Database;
 use Sibs\KronosApi\Environment;
@@ -33,18 +48,33 @@ use Sibs\KronosApi\Middleware\AdminSetupKeyMiddleware;
 use Sibs\KronosApi\Middleware\JwtAuthMiddleware;
 use Sibs\KronosApi\Repository\AccountRepository;
 use Sibs\KronosApi\Repository\AnnouncementRepository;
+use Sibs\KronosApi\Repository\AnnouncementRelationshipRepository;
+use Sibs\KronosApi\Repository\AnnouncementViewRepository;
 use Sibs\KronosApi\Repository\BatchTableRepository;
 use Sibs\KronosApi\Repository\ConfirmationRepository;
 use Sibs\KronosApi\Repository\CronSettingRepository;
 use Sibs\KronosApi\Repository\DepartmentRepository;
 use Sibs\KronosApi\Repository\DobRecordRepository;
 use Sibs\KronosApi\Repository\DtrPublishRepository;
+use Sibs\KronosApi\Repository\DtrRelationshipRepository;
+use Sibs\KronosApi\Repository\DtrViewRepository;
 use Sibs\KronosApi\Repository\EmployeeAccountAssignmentRepository;
 use Sibs\KronosApi\Repository\EmployeeRepository;
 use Sibs\KronosApi\Repository\EmployeeDirectoryRepository;
 use Sibs\KronosApi\Repository\EmployeeRelationshipRepository;
+use Sibs\KronosApi\Repository\EmployeeScheduleRepository;
 use Sibs\KronosApi\Repository\UserRepository;
 use Sibs\KronosApi\Repository\IndividualResourceRepository;
+use Sibs\KronosApi\Repository\HolidayRelationshipRepository;
+use Sibs\KronosApi\Repository\HolidayViewRepository;
+use Sibs\KronosApi\Repository\LeaveRelationshipRepository;
+use Sibs\KronosApi\Repository\LeaveViewRepository;
+use Sibs\KronosApi\Repository\QdsRelationshipRepository;
+use Sibs\KronosApi\Repository\QdsViewRepository;
+use Sibs\KronosApi\Repository\TeamToolRelationshipRepository;
+use Sibs\KronosApi\Repository\ToolRelationshipRepository;
+use Sibs\KronosApi\Repository\WorkforceRelationshipRepository;
+use Sibs\KronosApi\Repository\WorkforceViewRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
 use Sibs\KronosApi\Service\JwtService;
@@ -552,6 +582,20 @@ test('bootstrap never exposes unexpected exception details', function (): void {
     assertTrue(!str_contains($body, 'secret_column'), 'Exception or SQL details were exposed.');
     assertTrue(!str_contains($body, '/private/path.php'), 'Stack details were exposed.');
     assertSameValue('Server error.', responseJson($response)['message'], 'Server error was not generic JSON.');
+});
+
+test('bootstrap returns sanitized JSON for an unknown route', function (): void {
+    $app = require __DIR__ . '/../src/bootstrap.php';
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/__test/missing-route');
+
+    $response = $app->handle($request);
+
+    assertSameValue(404, $response->getStatusCode(), 'Unknown route did not return HTTP 404.');
+    assertSameValue(
+        ['success' => false, 'message' => 'Not Found.'],
+        responseJson($response),
+        'Unknown route did not return sanitized JSON.'
+    );
 });
 
 test('configuration reads process-level environment variables when $_ENV is unavailable', function (): void {
@@ -3459,6 +3503,259 @@ test('all employee relationship routes require JWT before repository creation', 
     assertSameValue(8, $repositoryCalls, 'Authorized relationship routes did not create one repository each.');
 });
 
+test('schedule relationship repository uses one explicit joined query per relationship', function (): void {
+    $singleCases = [
+        ['findEmployeeByScheduleEscalationId', 22, ':schedule_escalation_id', 'TRIM(e.gy_emp_code) = TRIM(s.gy_emp_code)', 'gy_emp_id'],
+        ['findEmployeeByScheduleId', 21, ':schedule_id', 's.gy_emp_id = e.gy_emp_id', 'gy_emp_id'],
+        ['findCreatedByUserByScheduleId', 21, ':schedule_id', 's.gy_sched_by = u.gy_user_id', '_related_id'],
+        ['findRequestedByUserByScheduleEscalationId', 22, ':schedule_escalation_id', 's.gy_req_by = u.gy_user_id', '_related_id'],
+        ['findRequestedToUserByScheduleEscalationId', 22, ':schedule_escalation_id', 's.gy_req_to = u.gy_user_id', '_related_id'],
+        ['findSupervisorUserByScheduleEscalationId', 22, ':schedule_escalation_id', 's.gy_sup = u.gy_user_id', '_related_id'],
+        ['findTrackerByScheduleRdRequestId', 23, ':schedule_rd_request_id', 'r.gy_tracker_id = t.gy_tracker_id', 'gy_tracker_id'],
+        ['findUserByScheduleRdRequestId', 23, ':schedule_rd_request_id', 'r.gy_user_id = u.gy_user_id', '_related_id'],
+    ];
+
+    foreach ($singleCases as [$method, $identifier, $placeholder, $join, $relatedKey]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => $identifier, $relatedKey => 91, 'gy_user_code' => 'test1'];
+        $result = (new EmployeeRelationshipRepository($pdo))->{$method}($identifier);
+
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $identifier, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its ID.");
+        assertTrue($result['data'] !== null, "{$method} returned no related resource.");
+        assertTrue(!array_key_exists('_related_id', $result['data']), "{$method} exposed an internal user ID.");
+        assertTrue(!str_contains((string) $pdo->query, 'u.gy_password'), "{$method} selected a password.");
+    }
+
+    $collectionCases = [
+        ['findSchedulesByEmployeeCode', 'test1', 'gy_sched_id', 'e.gy_emp_id = s.gy_emp_id', []],
+        ['findScheduleEscalationsByEmployeeCode', 'test1', 'gy_sched_esc_id', 'TRIM(s.gy_emp_code) = TRIM(e.gy_emp_code)', []],
+        ['findScheduleRdRequestsByUserCode', 'test1', 'gy_rd_id', 'u.gy_user_id = r.gy_user_id', []],
+        ['findSchedulesCreatedByUserCode', 'test1', 'gy_sched_id', 's.gy_sched_by = u.gy_user_id', ['s.gy_sched_by']],
+        ['findSubmittedScheduleEscalationsByUserCode', 'test1', 'gy_sched_esc_id', 's.gy_req_by = u.gy_user_id', ['s.gy_req_by', 's.gy_req_to', 's.gy_sup']],
+        ['findReceivedScheduleEscalationsByUserCode', 'test1', 'gy_sched_esc_id', 's.gy_req_to = u.gy_user_id', ['s.gy_req_by', 's.gy_req_to', 's.gy_sup']],
+        ['findSupervisedScheduleEscalationsByUserCode', 'test1', 'gy_sched_esc_id', 's.gy_sup = u.gy_user_id', ['s.gy_req_by', 's.gy_req_to', 's.gy_sup']],
+    ];
+
+    foreach ($collectionCases as [$method, $employeeCode, $cursorKey, $join, $forbiddenProjectionFields]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 7, $cursorKey => 137]];
+        $result = (new EmployeeRelationshipRepository($pdo))->{$method}($employeeCode, 100);
+
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertSameValue(['value' => 'test1', 'type' => PDO::PARAM_STR], $pdo->boundValues[':employee_code'] ?? null, "{$method} did not bind gy_emp_code.");
+        assertSameValue(['value' => 100, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        assertSameValue([[$cursorKey => 137]], $result['data'], "{$method} exposed an internal marker.");
+        $projection = substr((string) $pdo->query, 0, strpos((string) $pdo->query, ' FROM '));
+        foreach ($forbiddenProjectionFields as $field) {
+            assertTrue(!str_contains($projection, $field), "{$method} exposes internal user ID {$field}.");
+        }
+    }
+});
+
+test('schedule relationship routes are JWT protected and dispatch the confirmed joins', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService(
+        'kronos-api',
+        'kronos-api-clients',
+        3600,
+        $keys['private_path'],
+        $keys['public_path']
+    );
+    $repositoryCalls = 0;
+    $recordingPdos = [];
+    $repositoryFactory = static function () use (&$repositoryCalls, &$recordingPdos): EmployeeRelationshipRepository {
+        $repositoryCalls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 7, '_related_id' => 11, 'gy_emp_id' => 7, 'gy_tracker_id' => 31, 'gy_user_code' => 'test1'];
+        $pdo->fetchAllResult = [['_parent_id' => 7, 'gy_sched_id' => 21, 'gy_sched_esc_id' => 22, 'gy_rd_id' => 23]];
+        $recordingPdos[] = $pdo;
+
+        return new EmployeeRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        employeeRelationshipRepositoryFactory: $repositoryFactory
+    );
+    $app->addRoutingMiddleware();
+    $cases = [
+        ['/api/v1/employees/test1/schedules', 'FROM gy_employee e LEFT JOIN gy_schedule s'],
+        ['/api/v1/employees/test1/schedule-escalations', 'LEFT JOIN gy_schedule_escalate s'],
+        ['/api/v1/schedule-escalations/22/employee', 'FROM gy_schedule_escalate s LEFT JOIN gy_employee e'],
+        ['/api/v1/users/test1/schedule-rd-requests', 'FROM gy_user u LEFT JOIN gy_schedule_rd_request r'],
+        ['/api/v1/users/test1/created-schedules', 's.gy_sched_by = u.gy_user_id'],
+        ['/api/v1/users/test1/submitted-schedule-escalations', 's.gy_req_by = u.gy_user_id'],
+        ['/api/v1/users/test1/received-schedule-escalations', 's.gy_req_to = u.gy_user_id'],
+        ['/api/v1/users/test1/supervised-schedule-escalations', 's.gy_sup = u.gy_user_id'],
+        ['/api/v1/schedules/21/employee', 's.gy_emp_id = e.gy_emp_id'],
+        ['/api/v1/schedules/21/created-by-user', 's.gy_sched_by = u.gy_user_id'],
+        ['/api/v1/schedule-escalations/22/requested-by-user', 's.gy_req_by = u.gy_user_id'],
+        ['/api/v1/schedule-escalations/22/requested-to-user', 's.gy_req_to = u.gy_user_id'],
+        ['/api/v1/schedule-escalations/22/supervisor-user', 's.gy_sup = u.gy_user_id'],
+        ['/api/v1/schedule-rd-requests/23/tracker', 'r.gy_tracker_id = t.gy_tracker_id'],
+        ['/api/v1/schedule-rd-requests/23/user', 'r.gy_user_id = u.gy_user_id'],
+    ];
+
+    foreach ($cases as [$path]) {
+        $response = $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path));
+        assertSameValue(401, $response->getStatusCode(), "{$path} was not JWT protected.");
+    }
+    assertSameValue(0, $repositoryCalls, 'Schedule relationship repository was created before JWT authorization.');
+
+    $authorization = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($cases as $index => [$path, $queryFragment]) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)
+            ->withHeader('Authorization', $authorization);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+        assertTrue(str_contains((string) $recordingPdos[$index]->query, $queryFragment), "{$path} dispatched to the wrong join.");
+    }
+    assertSameValue(15, $repositoryCalls, 'Schedule relationship routes did not issue one query each.');
+});
+
+test('unsupported schedule relationship routes are not registered', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService(
+        'kronos-api',
+        'kronos-api-clients',
+        3600,
+        $keys['private_path'],
+        $keys['public_path']
+    );
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService
+    );
+    $patterns = array_map(
+        static fn ($route): string => $route->getPattern(),
+        $app->getRouteCollector()->getRoutes()
+    );
+
+    foreach ([
+        '/api/v1/schedule-rd-requests/{gy_rd_id}/approved-by-user',
+        '/api/v1/schedules/{gy_sched_id}/schedule-escalations',
+    ] as $unsupportedPattern) {
+        assertTrue(
+            !in_array($unsupportedPattern, $patterns, true),
+            "Unsupported relationship route {$unsupportedPattern} is registered."
+        );
+    }
+});
+
+test('workforce relationship repository uses confirmed explicit prepared joins', function (): void {
+    $singleCases = [
+        ['findSupervisorUserByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'e.gy_emp_supervisor = u.gy_user_id'],
+        ['findOperationsManagerUserByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'TRIM(e.gy_emp_om) = TRIM(u.gy_user_code)'],
+        ['findEmployeeByTrackerId', 31, ':tracker_id', PDO::PARAM_INT, 'TRIM(t.gy_emp_code) = TRIM(e.gy_emp_code)'],
+        ['findAccountByTrackerId', 31, ':tracker_id', PDO::PARAM_INT, 't.gy_account_id = a.gy_acc_id'],
+        ['findOperationsManagerUserByTrackerId', 31, ':tracker_id', PDO::PARAM_INT, 't.gy_tracker_om = u.gy_user_id'],
+        ['findTrackerByEscalationId', 32, ':escalation_id', PDO::PARAM_INT, 'x.gy_tracker_id = t.gy_tracker_id'],
+        ['findSubmittedByUserByEscalationId', 32, ':escalation_id', PDO::PARAM_INT, 'x.gy_esc_by = u.gy_user_id'],
+        ['findRecipientUserByEscalationId', 32, ':escalation_id', PDO::PARAM_INT, 'x.gy_esc_to = u.gy_user_id'],
+        ['findSupervisorUserByEscalationId', 32, ':escalation_id', PDO::PARAM_INT, 'x.gy_sup = u.gy_user_id'],
+    ];
+    foreach ($singleCases as [$method, $identifier, $placeholder, $type, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 1, '_related_id' => 2, 'resource_code' => 'safe'];
+        $result = (new WorkforceRelationshipRepository($pdo))->{$method}($identifier);
+
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertTrue(!str_contains((string) $pdo->query, 'gy_password'), "{$method} selected a password.");
+        assertSameValue(['value' => $identifier, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_code' => 'safe'], $result['data'], "{$method} exposed internal relationship IDs.");
+    }
+
+    $collectionCases = [
+        ['findTrackersByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'gy_tracker_id', 'TRIM(t.gy_emp_code) = TRIM(e.gy_emp_code)'],
+        ['findSupervisedEmployeesByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, 'gy_emp_id', 'e.gy_emp_supervisor = u.gy_user_id'],
+        ['findSubmittedEscalationsByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, 'gy_esc_id', 'x.gy_esc_by = u.gy_user_id'],
+        ['findReceivedEscalationsByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, 'gy_esc_id', 'x.gy_esc_to = u.gy_user_id'],
+        ['findSupervisedEscalationsByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, 'gy_esc_id', 'x.gy_sup = u.gy_user_id'],
+        ['findTrackersByAccountId', 12, ':account_id', PDO::PARAM_INT, 'gy_tracker_id', 't.gy_account_id = a.gy_acc_id'],
+        ['findEscalationsByTrackerId', 31, ':tracker_id', PDO::PARAM_INT, 'gy_esc_id', 'x.gy_tracker_id = t.gy_tracker_id'],
+    ];
+    foreach ($collectionCases as [$method, $identifier, $placeholder, $type, $cursor, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 1, $cursor => 137]];
+        $result = (new WorkforceRelationshipRepository($pdo))->{$method}($identifier, 100);
+
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertSameValue(['value' => $identifier, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its parent.");
+        assertSameValue(['value' => 100, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        assertSameValue([[$cursor => 137]], $result['data'], "{$method} exposed its parent marker.");
+    }
+});
+
+test('all workforce relationship routes require JWT and dispatch once', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): WorkforceRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 1, '_related_id' => 2, 'gy_user_code' => 'test1'];
+        $pdo->fetchAllResult = [['_parent_id' => 1, 'gy_tracker_id' => 31, 'gy_emp_id' => 7, 'gy_esc_id' => 32]];
+        $pdos[] = $pdo;
+        return new WorkforceRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        workforceRelationshipRepositoryFactory: $factory
+    );
+    $app->addRoutingMiddleware();
+    $paths = [
+        '/api/v1/employees/test1/supervisor-user',
+        '/api/v1/employees/test1/operations-manager-user',
+        '/api/v1/employees/test1/trackers',
+        '/api/v1/users/test1/supervised-employees',
+        '/api/v1/users/test1/submitted-escalations',
+        '/api/v1/users/test1/received-escalations',
+        '/api/v1/users/test1/supervised-escalations',
+        '/api/v1/accounts/12/trackers',
+        '/api/v1/trackers/31/employee',
+        '/api/v1/trackers/31/account',
+        '/api/v1/trackers/31/operations-manager-user',
+        '/api/v1/trackers/31/escalations',
+        '/api/v1/escalations/32/tracker',
+        '/api/v1/escalations/32/submitted-by-user',
+        '/api/v1/escalations/32/recipient-user',
+        '/api/v1/escalations/32/supervisor-user',
+    ];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Workforce repository ran before JWT authorization.');
+
+    $authorization = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $authorization);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(16, $calls, 'Workforce routes did not dispatch exactly once each.');
+});
+
 test('individual resource repository uses one exact explicit prepared query per lookup', function (): void {
     $employeeFields = 'gy_emp_id, gy_emp_code, gy_emp_type, gy_emp_schedtype, gy_emp_rate, '
         . 'gy_emp_email, gy_emp_lname, gy_emp_fname, gy_emp_mname, gy_emp_fullname, gy_acc_id, '
@@ -3502,6 +3799,61 @@ test('individual resource repository uses one exact explicit prepared query per 
             ':employee_code',
             PDO::PARAM_STR,
         ],
+        [
+            'findScheduleById',
+            21,
+            'SELECT gy_sched_id, gy_emp_id, gy_sched_day, gy_sched_mode, gy_sched_login, '
+                . 'gy_sched_breakout, gy_sched_breakin, gy_sched_logout, gy_sched_reg, gy_sched_by '
+                . 'FROM gy_schedule WHERE gy_sched_id = :schedule_id LIMIT 1',
+            ':schedule_id',
+            PDO::PARAM_INT,
+        ],
+        [
+            'findScheduleEscalationById',
+            22,
+            'SELECT gy_sched_esc_id, gy_sched_esc_code, gy_req_date, gy_req_status, gy_req_deny, '
+                . 'gy_req_by, gy_req_to, gy_sup, gy_emp_code, gy_emp_fullname, gy_sched_day, '
+                . 'gy_sched_mode, gy_sched_login, gy_sched_breakout, gy_sched_breakin, gy_sched_logout, '
+                . 'gy_tracker_login, gy_tracker_logout, gy_req_reason, gy_req_photodir, gy_publish, '
+                . 'old_sched_mode, old_sched_login, old_sched_breakout, old_sched_breakin, '
+                . 'old_sched_logout, old_tracker_login, old_tracker_logout, msg_usercode '
+                . 'FROM gy_schedule_escalate WHERE gy_sched_esc_id = :schedule_escalation_id LIMIT 1',
+            ':schedule_escalation_id',
+            PDO::PARAM_INT,
+        ],
+        [
+            'findScheduleRdRequestById',
+            23,
+            'SELECT gy_rd_id, gy_rd_date, gy_rd_status, gy_tracker_id, gy_user_id, gy_rd_approved_by '
+                . 'FROM gy_schedule_rd_request WHERE gy_rd_id = :schedule_rd_request_id LIMIT 1',
+            ':schedule_rd_request_id',
+            PDO::PARAM_INT,
+        ],
+        [
+            'findTrackerById',
+            31,
+            'SELECT gy_tracker_id, gy_tracker_code, gy_tracker_date, gy_emp_code, gy_emp_email, '
+                . 'gy_emp_fullname, gy_account_id, gy_emp_account, gy_tracker_login, gy_tracker_breakout, '
+                . 'gy_tracker_breakin, gy_tracker_logout, gy_tracker_wh, gy_tracker_bh, gy_tracker_ot, '
+                . 'gy_tracker_ath, gy_tracker_status, gy_tracker_request, gy_tracker_reason, '
+                . 'gy_tracker_history, gy_tracker_remarks, gy_tracker_loc '
+                . 'FROM gy_tracker WHERE gy_tracker_id = :tracker_id LIMIT 1',
+            ':tracker_id',
+            PDO::PARAM_INT,
+        ],
+        [
+            'findEscalationById',
+            32,
+            'SELECT gy_esc_id, gy_esc_type, gy_esc_reason, gy_esc_photodir, gy_esc_status, gy_esc_deny, '
+                . 'gy_esc_date, gy_tracker_id, gy_tracker_date, '
+                . 'gy_tracker_login, gy_tracker_breakout, gy_tracker_breakin, gy_tracker_logout, '
+                . 'gy_tracker_wh, gy_tracker_bh, gy_tracker_ot, gy_publish, gy_usercode, '
+                . 'old_tracker_date, old_tracker_login, old_tracker_breakout, old_tracker_breakin, '
+                . 'old_tracker_logout, msg_usercode FROM gy_escalate '
+                . 'WHERE gy_esc_id = :escalation_id LIMIT 1',
+            ':escalation_id',
+            PDO::PARAM_INT,
+        ],
     ];
 
     foreach ($cases as [$method, $identifier, $expectedQuery, $placeholder, $type]) {
@@ -3523,6 +3875,11 @@ test('individual resource controller returns one compact resource and normalizes
         ['account', ['gy_acc_id' => '12'], ':account_id', 12],
         ['department', ['id_department' => '5'], ':department_id', 5],
         ['user', ['gy_emp_code' => '  test1  '], ':employee_code', 'test1'],
+        ['schedule', ['gy_sched_id' => '21'], ':schedule_id', 21],
+        ['scheduleEscalation', ['gy_sched_esc_id' => '22'], ':schedule_escalation_id', 22],
+        ['scheduleRdRequest', ['gy_rd_id' => '23'], ':schedule_rd_request_id', 23],
+        ['tracker', ['gy_tracker_id' => '31'], ':tracker_id', 31],
+        ['escalation', ['gy_esc_id' => '32'], ':escalation_id', 32],
     ];
 
     foreach ($cases as [$method, $arguments, $placeholder, $expectedValue]) {
@@ -3552,6 +3909,11 @@ test('individual resource controller rejects invalid identifiers before creating
         ['account', ['gy_acc_id' => 'not-an-id']],
         ['department', ['id_department' => '-1']],
         ['user', ['gy_emp_code' => '']],
+        ['schedule', ['gy_sched_id' => '0']],
+        ['scheduleEscalation', ['gy_sched_esc_id' => 'bad']],
+        ['scheduleRdRequest', ['gy_rd_id' => '-2']],
+        ['tracker', ['gy_tracker_id' => '0']],
+        ['escalation', ['gy_esc_id' => 'bad']],
     ];
 
     foreach ($cases as [$method, $arguments]) {
@@ -3641,6 +4003,11 @@ test('all individual resource routes require JWT and dispatch one lookup each', 
         ['/api/v1/accounts/12', 'FROM gy_accounts'],
         ['/api/v1/departments/5', 'FROM gy_department'],
         ['/api/v1/users/test1', 'FROM gy_user'],
+        ['/api/v1/schedule/21', 'FROM gy_schedule'],
+        ['/api/v1/schedule-escalations/22', 'FROM gy_schedule_escalate'],
+        ['/api/v1/schedule-rd-requests/23', 'FROM gy_schedule_rd_request'],
+        ['/api/v1/trackers/31', 'FROM gy_tracker'],
+        ['/api/v1/escalations/32', 'FROM gy_escalate'],
     ];
 
     foreach ($routesUnderTest as [$path]) {
@@ -3658,5 +4025,1744 @@ test('all individual resource routes require JWT and dispatch one lookup each', 
         assertSameValue(200, $response->getStatusCode(), "Authorized {$path} request failed.");
         assertTrue(str_contains((string) ($recordingPdos[$index]->query ?? ''), $queryFragment), "{$path} dispatched to the wrong lookup.");
     }
-    assertSameValue(4, $repositoryCalls, 'Individual routes did not create exactly one repository each.');
+    assertSameValue(9, $repositoryCalls, 'Individual routes did not create exactly one repository each.');
+});
+
+test('employee schedule repository runs one count and one explicit paginated query', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['gy_sched_id' => 21, 'gy_emp_id' => 7]];
+    $repository = new EmployeeScheduleRepository($pdo);
+
+    $result = $repository->findPage(7, 2, 15, 'night', '2026-09-01', '2026-09-30');
+
+    assertSameValue(2, count($pdo->queries), 'Employee schedules must execute exactly two queries.');
+    foreach ($pdo->queries as $query) {
+        assertTrue(str_contains($query, 'FROM gy_schedule WHERE gy_emp_id = :employee_id'), 'Employee schedule filter is missing.');
+        assertTrue(str_contains($query, 'DATE(gy_sched_day) >= :date_from'), 'Start-date filter is missing.');
+        assertTrue(str_contains($query, 'DATE(gy_sched_day) <= :date_to'), 'End-date filter is missing.');
+        assertTrue(str_contains($query, "DATE_FORMAT(gy_sched_day, '%M %e, %Y') LIKE :search_1"), 'Formatted date search is missing.');
+        assertTrue(!str_contains(strtoupper($query), 'SELECT *'), 'Employee schedules used SELECT *.');
+    }
+    assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total '), 'Employee schedule count query is incorrect.');
+    assertTrue(str_starts_with($pdo->queries[1], 'SELECT gy_sched_id, gy_emp_id, gy_sched_day'), 'Employee schedule projection is not explicit.');
+    assertTrue(str_contains($pdo->queries[1], 'ORDER BY gy_sched_day DESC, gy_sched_id DESC LIMIT :limit OFFSET :offset'), 'Employee schedule ordering or pagination is incorrect.');
+    assertSameValue(['value' => 7, 'type' => PDO::PARAM_INT], $pdo->bindings[0][':employee_id'] ?? null, 'Employee ID was not bound safely.');
+    assertSameValue(['value' => '%night%', 'type' => PDO::PARAM_STR], $pdo->bindings[1][':search_0'] ?? null, 'Search was not bound safely.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, 'Limit was not bound safely.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, 'Offset was not calculated correctly.');
+    assertSameValue(['data' => $pdo->fetchAllResults[1], 'total' => 16], $result, 'Employee schedule page is incorrect.');
+});
+
+test('employee schedule controller validates filters and returns the required pagination shape', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['gy_sched_id' => 21, 'gy_emp_id' => 7]];
+    $controller = new EmployeeScheduleController(
+        static fn (): EmployeeScheduleRepository => new EmployeeScheduleRepository($pdo)
+    );
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-schedules')
+        ->withQueryParams(['gy_emp_id' => '7']);
+    $response = $controller->index($request, (new ResponseFactory())->createResponse());
+
+    assertSameValue(200, $response->getStatusCode(), 'Employee schedule view returned the wrong status.');
+    assertSameValue([
+        'success' => true,
+        'data' => $pdo->fetchAllResults[1],
+        'filters' => ['search' => '', 'dateFrom' => '', 'dateTo' => ''],
+        'pagination' => [
+            'currentPage' => 1,
+            'totalPages' => 2,
+            'totalRecords' => 16,
+            'total' => 16,
+            'limit' => 15,
+            'hasPreviousPage' => false,
+            'hasNextPage' => true,
+        ],
+    ], responseJson($response), 'Employee schedule response shape is incorrect.');
+
+    foreach ([
+        [],
+        ['gy_emp_id' => '0'],
+        ['gy_emp_id' => 'bad'],
+        ['gy_emp_id' => '7', 'date_from' => '2026-02-30'],
+        ['gy_emp_id' => '7', 'date_to' => '09/30/2026'],
+    ] as $query) {
+        $repositoryCreated = false;
+        $invalidController = new EmployeeScheduleController(
+            static function () use (&$repositoryCreated): EmployeeScheduleRepository {
+                $repositoryCreated = true;
+                return new EmployeeScheduleRepository(new EmployeeDirectoryRecordingPdo());
+            }
+        );
+        $invalidRequest = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-schedules')
+            ->withQueryParams($query);
+        $invalid = $invalidController->index($invalidRequest, (new ResponseFactory())->createResponse());
+
+        assertSameValue(400, $invalid->getStatusCode(), 'Invalid employee schedule filters were accepted.');
+        assertSameValue(['success' => false, 'message' => 'Invalid query parameters.'], responseJson($invalid), 'Validation details were exposed.');
+        assertSameValue(false, $repositoryCreated, 'Repository was created before employee schedule validation.');
+    }
+});
+
+test('employee schedules route requires JWT before running its two queries', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 0];
+    $repositoryCalls = 0;
+    $factory = static function () use (&$repositoryCalls, $pdo): EmployeeScheduleRepository {
+        $repositoryCalls++;
+        return new EmployeeScheduleRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        employeeScheduleRepositoryFactory: $factory
+    );
+    $app->addRoutingMiddleware();
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-schedules?gy_emp_id=7');
+
+    assertSameValue(401, $app->handle($request)->getStatusCode(), 'Employee schedules route is not JWT protected.');
+    assertSameValue(0, $repositoryCalls, 'Employee schedule repository ran before authorization.');
+
+    $authorized = $request->withHeader('Authorization', 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']));
+    assertSameValue(200, $app->handle($authorized)->getStatusCode(), 'Employee schedules rejected a valid JWT.');
+    assertSameValue(1, $repositoryCalls, 'Employee schedules did not create one repository.');
+    assertSameValue(2, count($pdo->queries), 'Employee schedules did not run exactly two queries.');
+});
+
+test('workforce optimized views use complete joins and exactly two prepared queries', function (): void {
+    $cases = [
+        [
+            'findEmployeeAttendancePage',
+            ['gy_emp_code' => 'test1', 'account_id' => 12, 'department_id' => 5, 'date_from' => '2026-09-01', 'date_to' => '2026-09-30', 'search' => 'late'],
+            ['JOIN gy_employee e', 'JOIN gy_accounts a', 'JOIN gy_department d'],
+            ['TRIM(e.gy_emp_code) = :gy_emp_code', 'a.gy_acc_id = :account_id', 'a.gy_dept_id = :department_id'],
+        ],
+        [
+            'findEmployeeTrackerHistoryPage',
+            ['gy_emp_code' => 'test1', 'account_id' => 12, 'date_from' => '2026-09-01', 'date_to' => '2026-09-30', 'search' => 'late'],
+            ['JOIN gy_employee e', 'JOIN gy_accounts a'],
+            ['TRIM(e.gy_emp_code) = :gy_emp_code', 'a.gy_acc_id = :account_id'],
+        ],
+        [
+            'findEscalationQueuePage',
+            ['status' => 0, 'gy_emp_code' => 'test1', 'account_id' => 12, 'submitted_by' => 'lead1', 'recipient' => 'lead2', 'date_from' => '2026-09-01', 'date_to' => '2026-09-30', 'search' => 'late'],
+            ['JOIN gy_tracker t', 'JOIN gy_user submittedBy', 'JOIN gy_user recipient', 'JOIN gy_user supervisor', 'JOIN gy_employee e', 'JOIN gy_accounts a'],
+            ['x.gy_esc_status = :status', 'TRIM(submittedBy.gy_user_code) = :submitted_by', 'TRIM(recipient.gy_user_code) = :recipient'],
+        ],
+    ];
+
+    foreach ($cases as [$method, $filters, $joins, $conditions]) {
+        $pdo = new EmployeeDirectoryRecordingPdo();
+        $pdo->fetchResults[0] = ['total' => 17];
+        $pdo->fetchAllResults[1] = [['record_id' => 1]];
+        $result = (new WorkforceViewRepository($pdo))->{$method}(2, 15, $filters);
+
+        assertSameValue(2, count($pdo->queries), "{$method} did not execute exactly two queries.");
+        assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total '), "{$method} count query is incorrect.");
+        assertTrue(!str_contains(strtoupper($pdo->queries[1]), 'SELECT *'), "{$method} used SELECT *.");
+        foreach ($joins as $join) {
+            assertTrue(str_contains($pdo->queries[1], $join), "{$method} omitted {$join}.");
+        }
+        foreach ($conditions as $condition) {
+            assertTrue(str_contains($pdo->queries[1], $condition), "{$method} omitted filter {$condition}.");
+        }
+        assertTrue(!str_contains($pdo->queries[1], 'DATE(t.gy_tracker_date)'), "{$method} wraps the tracker date column in a function.");
+        assertTrue(!str_contains($pdo->queries[1], 'DATE(x.gy_esc_date)'), "{$method} wraps the escalation date column in a function.");
+        assertTrue(str_contains($pdo->queries[1], 'LIMIT :limit OFFSET :offset'), "{$method} omitted server-side pagination.");
+        assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, "{$method} did not bind its limit.");
+        assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, "{$method} calculated the wrong offset.");
+        assertSameValue(['data' => [['record_id' => 1]], 'total' => 17], $result, "{$method} returned the wrong page.");
+    }
+});
+
+test('Batch 1 projections never expose join-only user IDs', function (): void {
+    $relationshipCases = [
+        ['findSupervisedEmployeesByUserCode', ['test1', 0], ['e.gy_emp_supervisor']],
+        ['findTrackersByEmployeeCode', ['test1', 0], ['t.gy_tracker_om']],
+        ['findSubmittedEscalationsByUserCode', ['test1', 0], ['x.gy_esc_by', 'x.gy_esc_to', 'x.gy_sup']],
+    ];
+    foreach ($relationshipCases as [$method, $arguments, $forbidden]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 1]];
+        (new WorkforceRelationshipRepository($pdo))->{$method}(...$arguments);
+        $projection = substr((string) $pdo->query, 0, strpos((string) $pdo->query, ' FROM '));
+        foreach ($forbidden as $field) {
+            assertTrue(!str_contains($projection, $field), "{$method} exposes {$field}.");
+        }
+    }
+
+    $viewPdo = new EmployeeDirectoryRecordingPdo();
+    $viewPdo->fetchResults[0] = ['total' => 0];
+    $views = new WorkforceViewRepository($viewPdo);
+    $views->findEmployeeAttendancePage(1, 15, []);
+    $attendanceProjection = substr($viewPdo->queries[1], 0, strpos($viewPdo->queries[1], ' FROM '));
+    assertTrue(!str_contains($attendanceProjection, 'employee_supervisor_id'), 'Attendance exposes the supervisor user ID.');
+    assertTrue(!str_contains($attendanceProjection, 't.gy_tracker_om'), 'Attendance exposes the tracker manager user ID.');
+
+    $queuePdo = new EmployeeDirectoryRecordingPdo();
+    $queuePdo->fetchResults[0] = ['total' => 0];
+    (new WorkforceViewRepository($queuePdo))->findEscalationQueuePage(1, 15, []);
+    $queueProjection = substr($queuePdo->queries[1], 0, strpos($queuePdo->queries[1], ' FROM '));
+    foreach (['x.gy_esc_by', 'x.gy_esc_to', 'x.gy_sup', 't.gy_tracker_om', 'employee_supervisor_id'] as $field) {
+        assertTrue(!str_contains($queueProjection, $field), "Escalation queue exposes {$field}.");
+    }
+    assertTrue(str_contains($queueProjection, 'submittedBy.gy_user_code AS submitted_by_user_code'), 'Escalation queue omitted public submitter identity.');
+    assertTrue(str_contains($queueProjection, 'recipient.gy_user_code AS recipient_user_code'), 'Escalation queue omitted public recipient identity.');
+    assertTrue(str_contains($queueProjection, 'supervisor.gy_user_code AS supervisor_user_code'), 'Escalation queue omitted public supervisor identity.');
+});
+
+test('workforce optimized view controller validates filters and returns numbered pagination', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['gy_tracker_id' => 31]];
+    $controller = new WorkforceViewController(static fn (): WorkforceViewRepository => new WorkforceViewRepository($pdo));
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-attendance')
+        ->withQueryParams(['page' => '1', 'limit' => '15', 'gy_emp_code' => ' test1 ']);
+    $response = $controller->employeeAttendance($request, (new ResponseFactory())->createResponse());
+    $payload = responseJson($response);
+
+    assertSameValue(200, $response->getStatusCode(), 'Employee attendance returned the wrong status.');
+    assertSameValue(16, $payload['pagination']['totalRecords'], 'Workforce view total is incorrect.');
+    assertSameValue(2, $payload['pagination']['totalPages'], 'Workforce view page count is incorrect.');
+    assertSameValue(true, $payload['pagination']['hasNextPage'], 'Workforce view next-page flag is incorrect.');
+    assertSameValue('test1', $payload['filters']['gyEmpCode'], 'Employee code filter was not normalized.');
+
+    foreach ([
+        ['account_id' => 'bad'],
+        ['gy_emp_code' => '123456789012'],
+        ['date_from' => '2026-02-30'],
+        ['status' => '-1'],
+        ['submitted_by' => ['bad']],
+    ] as $query) {
+        $created = false;
+        $invalidController = new WorkforceViewController(static function () use (&$created): WorkforceViewRepository {
+            $created = true;
+            return new WorkforceViewRepository(new EmployeeDirectoryRecordingPdo());
+        });
+        $invalidRequest = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/escalation-queue')->withQueryParams($query);
+        $invalid = $invalidController->escalationQueue($invalidRequest, (new ResponseFactory())->createResponse());
+        assertSameValue(400, $invalid->getStatusCode(), 'Invalid optimized-view filter was accepted.');
+        assertSameValue(false, $created, 'Optimized-view repository ran before validation.');
+    }
+});
+
+test('all workforce optimized view routes require JWT', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): WorkforceViewRepository {
+        $calls++;
+        $pdo = new EmployeeDirectoryRecordingPdo();
+        $pdo->fetchResults[0] = ['total' => 0];
+        return new WorkforceViewRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        workforceViewRepositoryFactory: $factory
+    );
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/employee-attendance', '/api/v1/employee-tracker-history', '/api/v1/escalation-queue'];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Workforce view repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(3, $calls, 'Workforce views did not dispatch once each.');
+});
+
+test('Batch 3 individual leave resources use one explicit prepared lookup', function (): void {
+    $cases = [
+        ['findLeaveById', 41, ':leave_id', 'SELECT gy_leave_id, gy_acc_id, gy_leave_filed, gy_leave_type, gy_leave_paid, gy_leave_day, gy_leave_period_one, gy_leave_period_two, gy_emp_rate, gy_old_credits, gy_new_credits, gy_leave_date_from, gy_leave_date_to, gy_leave_reason, gy_leave_status, gy_leave_date_approved, gy_leave_remarks, gy_leave_attachment, gy_publish, msg_usercode FROM gy_leave WHERE gy_leave_id = :leave_id LIMIT 1'],
+        ['findLeaveAvailabilityById', 42, ':leave_availability_id', 'SELECT gy_leave_avail_id, gy_leave_avail_date, gy_leave_avail_dateto, gy_leave_avail_plotted, gy_leave_avail_approved, gy_leave_avail_justify, gy_acc_id FROM gy_leave_available WHERE gy_leave_avail_id = :leave_availability_id LIMIT 1'],
+        ['findLeaveCreditHistoryById', 43, ':leave_credit_history_id', 'SELECT lch_id, lch_emp_code, lch_date, lch_old_credits, lch_new_credits, lch_type, lch_trigger_date_type, lch_trigger_amount, lch_trigger_affected_type, lch_updated_by, lch_daterecorded, lch_operation FROM leave_credits_history WHERE lch_id = :leave_credit_history_id LIMIT 1'],
+    ];
+
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong query.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 3 individual leave routes are unique and JWT protected', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        individualResourceRepositoryFactory: $factory
+    );
+    $app->addRoutingMiddleware();
+    $paths = [
+        '/api/v1/leaves/41',
+        '/api/v1/leave-availability/42',
+        '/api/v1/leave-credit-history/43',
+    ];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Individual leave repository ran before authorization.');
+
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(3, $calls, 'Individual leave routes did not dispatch once each.');
+});
+
+test('Batch 3 leave relationships use one explicit prepared join per request', function (): void {
+    $singleCases = [
+        ['findUserByLeaveId', 41, ':leave_id', PDO::PARAM_INT, 'l.gy_user_id = u.gy_user_id'],
+        ['findAccountByLeaveId', 41, ':leave_id', PDO::PARAM_INT, 'l.gy_acc_id = a.gy_acc_id'],
+        ['findApproverUserByLeaveId', 41, ':leave_id', PDO::PARAM_INT, 'l.gy_leave_approver = u.gy_user_id'],
+        ['findUserByLeaveAvailabilityId', 42, ':leave_availability_id', PDO::PARAM_INT, 'v.gy_user_id = u.gy_user_id'],
+        ['findAccountByLeaveAvailabilityId', 42, ':leave_availability_id', PDO::PARAM_INT, 'v.gy_acc_id = a.gy_acc_id'],
+        ['findEmployeeByLeaveCreditHistoryId', 43, ':leave_credit_history_id', PDO::PARAM_INT, 'TRIM(h.lch_emp_code) = TRIM(e.gy_emp_code)'],
+        ['findUpdatedByUserByLeaveCreditHistoryId', 43, ':leave_credit_history_id', PDO::PARAM_INT, 'TRIM(h.lch_updated_by) = TRIM(u.gy_user_code)'],
+    ];
+    foreach ($singleCases as [$method, $id, $placeholder, $type, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => $id, '_related_id' => 7, 'public_code' => 'safe'];
+        $result = (new LeaveRelationshipRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertTrue(!str_contains((string) $pdo->query, 'gy_password'), "{$method} selected a password.");
+        assertSameValue(['value' => $id, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['public_code' => 'safe'], $result['data'], "{$method} exposed an internal relationship ID.");
+    }
+
+    $collectionCases = [
+        ['findLeaveCreditHistoryByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, [], 'lch_id', 'TRIM(h.lch_emp_code) = TRIM(e.gy_emp_code)'],
+        ['findLeavesByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, ['l.gy_user_id', 'l.gy_leave_approver'], 'gy_leave_id', 'l.gy_user_id = u.gy_user_id'],
+        ['findApprovedLeavesByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, ['l.gy_user_id', 'l.gy_leave_approver'], 'gy_leave_id', 'l.gy_leave_approver = u.gy_user_id'],
+        ['findLeaveAvailabilityByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, ['v.gy_user_id'], 'gy_leave_avail_id', 'v.gy_user_id = u.gy_user_id'],
+        ['findLeaveCreditHistoryUpdatedByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, [], 'lch_id', 'TRIM(h.lch_updated_by) = TRIM(u.gy_user_code)'],
+        ['findLeavesByAccountId', 12, ':account_id', PDO::PARAM_INT, ['l.gy_user_id', 'l.gy_leave_approver'], 'gy_leave_id', 'l.gy_acc_id = a.gy_acc_id'],
+        ['findLeaveAvailabilityByAccountId', 12, ':account_id', PDO::PARAM_INT, ['v.gy_user_id'], 'gy_leave_avail_id', 'v.gy_acc_id = a.gy_acc_id'],
+    ];
+    foreach ($collectionCases as [$method, $parent, $placeholder, $type, $internalFields, $cursor, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 7, $cursor => 137]];
+        $result = (new LeaveRelationshipRepository($pdo))->{$method}($parent, 100);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertSameValue(['value' => $parent, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its public parent identifier.");
+        assertSameValue(['value' => 100, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        $projection = substr((string) $pdo->query, 0, strpos((string) $pdo->query, ' FROM '));
+        foreach ($internalFields as $internalField) {
+            assertTrue(!str_contains($projection, $internalField), "{$method} exposes internal relationship field {$internalField}.");
+        }
+        assertSameValue([[$cursor => 137]], $result['data'], "{$method} exposed an internal marker.");
+    }
+});
+
+test('Batch 3 leave relationship routes require JWT and dispatch the confirmed joins', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): LeaveRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 1, '_related_id' => 2, 'public_code' => 'safe'];
+        $pdo->fetchAllResult = [['_parent_id' => 1, 'gy_leave_id' => 41, 'gy_leave_avail_id' => 42, 'lch_id' => 43]];
+        $pdos[] = $pdo;
+        return new LeaveRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        leaveRelationshipRepositoryFactory: $factory
+    );
+    $app->addRoutingMiddleware();
+    $cases = [
+        ['/api/v1/employees/test1/leave-credit-history', 'TRIM(h.lch_emp_code) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/users/test1/leaves', 'l.gy_user_id = u.gy_user_id'],
+        ['/api/v1/users/test1/approved-leaves', 'l.gy_leave_approver = u.gy_user_id'],
+        ['/api/v1/users/test1/leave-availability', 'v.gy_user_id = u.gy_user_id'],
+        ['/api/v1/users/test1/leave-credit-history-updated', 'TRIM(h.lch_updated_by) = TRIM(u.gy_user_code)'],
+        ['/api/v1/accounts/12/leaves', 'l.gy_acc_id = a.gy_acc_id'],
+        ['/api/v1/accounts/12/leave-availability', 'v.gy_acc_id = a.gy_acc_id'],
+        ['/api/v1/leaves/41/user', 'l.gy_user_id = u.gy_user_id'],
+        ['/api/v1/leaves/41/account', 'l.gy_acc_id = a.gy_acc_id'],
+        ['/api/v1/leaves/41/approver-user', 'l.gy_leave_approver = u.gy_user_id'],
+        ['/api/v1/leave-availability/42/user', 'v.gy_user_id = u.gy_user_id'],
+        ['/api/v1/leave-availability/42/account', 'v.gy_acc_id = a.gy_acc_id'],
+        ['/api/v1/leave-credit-history/43/employee', 'TRIM(h.lch_emp_code) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/leave-credit-history/43/updated-by-user', 'TRIM(h.lch_updated_by) = TRIM(u.gy_user_code)'],
+    ];
+    foreach ($cases as [$path]) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Leave relationship repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($cases as $index => [$path, $join]) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+        assertTrue(str_contains((string) $pdos[$index]->query, $join), "{$path} dispatched to the wrong join.");
+    }
+    assertSameValue(14, $calls, 'Leave relationship routes did not dispatch once each.');
+});
+
+test('Batch 3 optimized leave views use complete joins and exactly two prepared queries', function (): void {
+    $cases = [
+        [
+            'findEmployeeLeavesPage',
+            ['gy_emp_code' => 'test1', 'status' => 0, 'leave_type' => 'VL', 'date_from' => '2026-10-01', 'date_to' => '2026-10-31', 'search' => 'annual'],
+            ['JOIN gy_user u', 'LEFT JOIN gy_employee e', 'LEFT JOIN gy_accounts a', 'LEFT JOIN gy_user approver'],
+            ['TRIM(u.gy_user_code) = :gy_emp_code', 'l.gy_leave_status = :status', 'l.gy_leave_type = :leave_type'],
+            false,
+        ],
+        [
+            'findLeaveManagementPage',
+            ['gy_emp_code' => 'test1', 'account_id' => 12, 'department_id' => 5, 'status' => 0, 'leave_type' => 'VL', 'date_from' => '2026-10-01', 'date_to' => '2026-10-31', 'search' => 'annual'],
+            ['JOIN gy_user u', 'LEFT JOIN gy_employee e', 'LEFT JOIN gy_accounts a', 'LEFT JOIN gy_user approver', 'LEFT JOIN gy_department d'],
+            ['a.gy_acc_id = :account_id', 'a.gy_dept_id = :department_id'],
+            true,
+        ],
+    ];
+    foreach ($cases as [$method, $filters, $joins, $conditions, $department]) {
+        $pdo = new EmployeeDirectoryRecordingPdo();
+        $pdo->fetchResults[0] = ['total' => 17];
+        $pdo->fetchAllResults[1] = [['leave_id' => 41]];
+        $result = (new LeaveViewRepository($pdo))->{$method}(2, 15, $filters);
+        assertSameValue(2, count($pdo->queries), "{$method} did not execute exactly two queries.");
+        assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total '), "{$method} count query is incorrect.");
+        assertTrue(!str_contains(strtoupper($pdo->queries[1]), 'SELECT *'), "{$method} used SELECT *.");
+        foreach ($joins as $join) { assertTrue(str_contains($pdo->queries[1], $join), "{$method} omitted {$join}."); }
+        foreach ($conditions as $condition) { assertTrue(str_contains($pdo->queries[1], $condition), "{$method} omitted {$condition}."); }
+        assertTrue(str_contains($pdo->queries[1], 'l.gy_leave_date_to >= :date_from'), "{$method} omitted overlapping start-date filtering.");
+        assertTrue(str_contains($pdo->queries[1], 'l.gy_leave_date_from < DATE_ADD(:date_to, INTERVAL 1 DAY)'), "{$method} omitted overlapping end-date filtering.");
+        assertTrue(str_contains($pdo->queries[1], 'ORDER BY l.gy_leave_filed DESC, l.gy_leave_id DESC LIMIT :limit OFFSET :offset'), "{$method} uses the wrong ordering or pagination.");
+        $projection = substr($pdo->queries[1], 0, strpos($pdo->queries[1], ' FROM '));
+        foreach (['l.gy_user_id', 'l.gy_leave_approver', 'u.gy_user_id', 'approver.gy_user_id', 'gy_password'] as $forbidden) {
+            assertTrue(!str_contains($projection, $forbidden), "{$method} exposes {$forbidden}.");
+        }
+        assertSameValue($department, str_contains($projection, 'department_name'), "{$method} returned the wrong department projection.");
+        assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, "{$method} did not bind limit.");
+        assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, "{$method} calculated the wrong offset.");
+        assertSameValue(['value' => '0', 'type' => PDO::PARAM_STR], $pdo->bindings[1][':status'] ?? null, "{$method} did not bind the VARCHAR status safely.");
+        assertSameValue(['data' => [['leave_id' => 41]], 'total' => 17], $result, "{$method} returned the wrong page.");
+    }
+});
+
+test('Batch 3 history employee relationship matches the safe employee resource fields', function (): void {
+    $pdo = new RecordingPdo();
+    $pdo->fetchResult = ['_parent_id' => 43, '_related_id' => 7, 'gy_emp_id' => 7];
+    (new LeaveRelationshipRepository($pdo))->findEmployeeByLeaveCreditHistoryId(43);
+    $projection = substr((string) $pdo->query, 0, strpos((string) $pdo->query, ' FROM '));
+    assertTrue(str_contains($projection, 'e.gy_emp_supervisor'), 'History employee response omitted the canonical supervisor field.');
+});
+
+test('Batch 3 leave view controller validates filters and returns numbered pagination', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['leave_id' => 41]];
+    $controller = new LeaveViewController(static fn (): LeaveViewRepository => new LeaveViewRepository($pdo));
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/leave-management')
+        ->withQueryParams(['page' => '1', 'limit' => '15', 'gy_emp_code' => ' test1 ', 'department_id' => '5']);
+    $response = $controller->leaveManagement($request, (new ResponseFactory())->createResponse());
+    $payload = responseJson($response);
+    assertSameValue(200, $response->getStatusCode(), 'Leave management returned the wrong status.');
+    assertSameValue(16, $payload['pagination']['totalRecords'], 'Leave management returned the wrong total.');
+    assertSameValue(2, $payload['pagination']['totalPages'], 'Leave management returned the wrong page count.');
+    assertSameValue('test1', $payload['filters']['gyEmpCode'], 'Leave management did not normalize gy_emp_code.');
+    assertSameValue(5, $payload['filters']['departmentId'], 'Leave management omitted department filtering.');
+
+    foreach ([['account_id' => 'bad'], ['status' => '-1'], ['date_from' => '2026-02-30'], ['date_from' => '2026-10-31', 'date_to' => '2026-10-01'], ['leave_type' => ['bad']]] as $query) {
+        $created = false;
+        $invalidController = new LeaveViewController(static function () use (&$created): LeaveViewRepository {
+            $created = true;
+            return new LeaveViewRepository(new EmployeeDirectoryRecordingPdo());
+        });
+        $invalid = $invalidController->leaveManagement(
+            (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/leave-management')->withQueryParams($query),
+            (new ResponseFactory())->createResponse()
+        );
+        assertSameValue(400, $invalid->getStatusCode(), 'Invalid leave view filter was accepted.');
+        assertSameValue(false, $created, 'Leave view repository ran before validation.');
+    }
+});
+
+test('Batch 3 optimized leave view routes require JWT', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): LeaveViewRepository {
+        $calls++;
+        $pdo = new EmployeeDirectoryRecordingPdo();
+        $pdo->fetchResults[0] = ['total' => 0];
+        return new LeaveViewRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        leaveViewRepositoryFactory: $factory
+    );
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/employee-leaves', '/api/v1/leave-management'];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Leave view repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(2, $calls, 'Leave view routes did not dispatch once each.');
+});
+
+test('Batch 4 individual DTR resources use one safe explicit prepared lookup', function (): void {
+    $cases = [
+        ['findEmployeeLogById', 51, ':employee_log_id', 'SELECT gy_log_id, gy_log_date, gy_log_code, gy_log_email, gy_log_fullname, gy_log_account, gy_log_status FROM gy_logs WHERE gy_log_id = :employee_log_id LIMIT 1'],
+        ['findEmployeeEditLogById', 52, ':employee_edit_log_id', 'SELECT l.gy_editlog_id, e.gy_emp_code, l.gy_edit_date FROM gy_editlog l LEFT JOIN gy_employee e ON l.gy_emp_id = e.gy_emp_id WHERE l.gy_editlog_id = :employee_edit_log_id LIMIT 1'],
+        ['findDtrPublishById', 53, ':dtr_publish_id', 'SELECT dtr_publish_id, dtr_year, dtr_month, dtr_cutoff, gy_emp_code, dtr_noofhours, dtr_lateut, dtr_absences, dtr_regot, dtr_rdreg, dtr_rdot, dtr_shreg, dtr_shot, dtr_shrdreg, dtr_shrdot, dtr_lhreg, dtr_lhot, dtr_lhrdreg, dtr_lhrdot, dtr_ndreg, dtr_ndregot, dtr_ndrdreg, dtr_ndrdot, dtr_ndsh, dtr_ndshot, dtr_ndshrd, dtr_ndshrdot, dtr_ndlh, dtr_ndlhot, dtr_ndlhrd, dtr_ndlhrdot, dtr_mdrate, dtr_cmpute FROM dtr_publish WHERE dtr_publish_id = :dtr_publish_id LIMIT 1'],
+        ['findTimesheetAssignmentById', 54, ':timesheet_assignment_id', 'SELECT at_id, at_emp_code, at_account_id FROM assign_timesheet WHERE at_id = :timesheet_assignment_id LIMIT 1'],
+    ];
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong query.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 4 individual DTR routes are JWT protected', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, individualResourceRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/employee-logs/51', '/api/v1/employee-edit-logs/52', '/api/v1/dtr-publish/53', '/api/v1/timesheet-assignments/54'];
+    foreach ($paths as $path) { assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected."); }
+    assertSameValue(0, $calls, 'Batch 4 individual repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(4, $calls, 'Batch 4 individual routes did not dispatch once each.');
+});
+
+test('Batch 4 DTR relationships use one explicit prepared join per request', function (): void {
+    $singleCases = [
+        ['findEmployeeByLogId', 51, ':employee_log_id', 'l.gy_emp_id = e.gy_emp_id'],
+        ['findEmployeeByEditLogId', 52, ':employee_edit_log_id', 'l.gy_emp_id = e.gy_emp_id'],
+        ['findEmployeeByDtrPublishId', 53, ':dtr_publish_id', 'TRIM(d.gy_emp_code) = TRIM(e.gy_emp_code)'],
+        ['findPublisherUserByDtrPublishId', 53, ':dtr_publish_id', 'd.dtr_publisher = u.gy_user_id'],
+        ['findEmployeeByAssignmentId', 54, ':assignment_id', 'TRIM(t.at_emp_code) = TRIM(e.gy_emp_code)'],
+        ['findAccountByAssignmentId', 54, ':assignment_id', 't.at_account_id = a.gy_acc_id'],
+        ['findAddedByUserByAssignmentId', 54, ':assignment_id', 't.at_added_by = u.gy_user_id'],
+    ];
+    foreach ($singleCases as [$method, $id, $placeholder, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => $id, '_related_id' => 7, 'public_code' => 'safe'];
+        $result = (new DtrRelationshipRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertTrue(!str_contains((string) $pdo->query, 'gy_password'), "{$method} selected a password.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its ID.");
+        assertSameValue(['public_code' => 'safe'], $result['data'], "{$method} exposed an internal relationship ID.");
+    }
+
+    $collectionCases = [
+        ['findLogsByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'gy_log_id', 'l.gy_emp_id = e.gy_emp_id', ['l.gy_emp_id']],
+        ['findEditLogsByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'gy_editlog_id', 'l.gy_emp_id = e.gy_emp_id', ['l.gy_emp_id']],
+        ['findDtrPublicationsByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'dtr_publish_id', 'TRIM(d.gy_emp_code) = TRIM(e.gy_emp_code)', ['d.dtr_publisher']],
+        ['findAssignmentsByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'at_id', 'TRIM(t.at_emp_code) = TRIM(e.gy_emp_code)', ['t.at_added_by']],
+        ['findDtrPublicationsByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, 'dtr_publish_id', 'd.dtr_publisher = u.gy_user_id', ['d.dtr_publisher']],
+        ['findAssignmentsAddedByUserCode', 'test1', ':employee_code', PDO::PARAM_STR, 'at_id', 't.at_added_by = u.gy_user_id', ['t.at_added_by']],
+        ['findAssignmentsByAccountId', 12, ':account_id', PDO::PARAM_INT, 'at_id', 't.at_account_id = a.gy_acc_id', ['t.at_added_by']],
+    ];
+    foreach ($collectionCases as [$method, $parent, $placeholder, $type, $cursor, $join, $forbidden]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 7, $cursor => 137]];
+        $result = (new DtrRelationshipRepository($pdo))->{$method}($parent, 100);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertSameValue(['value' => $parent, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its public parent identifier.");
+        assertSameValue(['value' => 100, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        $projection = substr((string) $pdo->query, 0, strpos((string) $pdo->query, ' FROM '));
+        foreach ($forbidden as $field) { assertTrue(!str_contains($projection, $field), "{$method} exposes internal field {$field}."); }
+        assertSameValue([[$cursor => 137]], $result['data'], "{$method} exposed an internal marker.");
+    }
+});
+
+test('Batch 4 DTR relationship routes require JWT and dispatch confirmed joins', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): DtrRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 1, '_related_id' => 2, 'public_code' => 'safe'];
+        $pdo->fetchAllResult = [['_parent_id' => 1, 'gy_log_id' => 51, 'gy_editlog_id' => 52, 'dtr_publish_id' => 53, 'at_id' => 54]];
+        $pdos[] = $pdo;
+        return new DtrRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, dtrRelationshipRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $cases = [
+        ['/api/v1/employees/test1/logs', 'l.gy_emp_id = e.gy_emp_id'],
+        ['/api/v1/employees/test1/edit-logs', 'l.gy_emp_id = e.gy_emp_id'],
+        ['/api/v1/employees/test1/dtr-publish', 'TRIM(d.gy_emp_code) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/employees/test1/timesheet-assignments', 'TRIM(t.at_emp_code) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/users/test1/dtr-publications', 'd.dtr_publisher = u.gy_user_id'],
+        ['/api/v1/users/test1/timesheet-assignments-added', 't.at_added_by = u.gy_user_id'],
+        ['/api/v1/accounts/12/timesheet-assignments', 't.at_account_id = a.gy_acc_id'],
+        ['/api/v1/employee-logs/51/employee', 'l.gy_emp_id = e.gy_emp_id'],
+        ['/api/v1/employee-edit-logs/52/employee', 'l.gy_emp_id = e.gy_emp_id'],
+        ['/api/v1/dtr-publish/53/employee', 'TRIM(d.gy_emp_code) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/dtr-publish/53/publisher-user', 'd.dtr_publisher = u.gy_user_id'],
+        ['/api/v1/timesheet-assignments/54/employee', 'TRIM(t.at_emp_code) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/timesheet-assignments/54/account', 't.at_account_id = a.gy_acc_id'],
+        ['/api/v1/timesheet-assignments/54/added-by-user', 't.at_added_by = u.gy_user_id'],
+    ];
+    foreach ($cases as [$path]) { assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected."); }
+    assertSameValue(0, $calls, 'DTR relationship repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($cases as $index => [$path, $join]) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+        assertTrue(str_contains((string) $pdos[$index]->query, $join), "{$path} dispatched to the wrong join.");
+    }
+    assertSameValue(14, $calls, 'DTR relationship routes did not dispatch once each.');
+});
+
+test('Batch 4 optimized views use exact schema filters and two prepared queries', function (): void {
+    $cases = [
+        [
+            'findEmployeeDtrPage',
+            ['gy_emp_code' => 'test1', 'account_id' => 12, 'year' => 2026, 'month' => 9, 'search' => 'connect'],
+            ['JOIN gy_employee e', 'LEFT JOIN gy_accounts a', 'LEFT JOIN gy_user publisher'],
+            ['TRIM(d.gy_emp_code) = :gy_emp_code', 'a.gy_acc_id = :account_id', 'd.dtr_year = :year', 'd.dtr_month = :month'],
+            'ORDER BY d.dtr_year DESC, d.dtr_month DESC, d.dtr_cutoff DESC, d.dtr_publish_id DESC',
+            ['d.dtr_publisher', 'publisher.gy_user_id'],
+        ],
+        [
+            'findTimesheetAssignmentPage',
+            ['gy_emp_code' => 'test1', 'account_id' => 12, 'search' => 'connect'],
+            ['JOIN gy_employee e', 'JOIN gy_accounts a', 'LEFT JOIN gy_user addedBy'],
+            ['TRIM(t.at_emp_code) = :gy_emp_code', 'a.gy_acc_id = :account_id'],
+            'ORDER BY t.at_id DESC',
+            ['t.at_added_by', 'addedBy.gy_user_id'],
+        ],
+    ];
+    foreach ($cases as [$method, $filters, $joins, $conditions, $order, $forbidden]) {
+        $pdo = new EmployeeDirectoryRecordingPdo();
+        $pdo->fetchResults[0] = ['total' => 17];
+        $pdo->fetchAllResults[1] = [['record_id' => 1]];
+        $result = (new DtrViewRepository($pdo))->{$method}(2, 15, $filters);
+        assertSameValue(2, count($pdo->queries), "{$method} did not execute exactly two queries.");
+        assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total '), "{$method} count query is incorrect.");
+        assertTrue(!str_contains(strtoupper($pdo->queries[1]), 'SELECT *'), "{$method} used SELECT *.");
+        foreach ($joins as $join) { assertTrue(str_contains($pdo->queries[1], $join), "{$method} omitted {$join}."); }
+        foreach ($conditions as $condition) { assertTrue(str_contains($pdo->queries[1], $condition), "{$method} omitted {$condition}."); }
+        assertTrue(str_contains($pdo->queries[1], $order . ' LIMIT :limit OFFSET :offset'), "{$method} uses the wrong ordering.");
+        assertTrue(!str_contains($pdo->queries[1], ':date_from') && !str_contains($pdo->queries[1], ':date_to'), "{$method} invented a date filter.");
+        assertTrue(!str_contains($pdo->queries[1], ':status'), "{$method} invented a status filter.");
+        $projection = substr($pdo->queries[1], 0, strpos($pdo->queries[1], ' FROM '));
+        foreach ($forbidden as $field) { assertTrue(!str_contains($projection, $field), "{$method} exposes internal user ID {$field}."); }
+        assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, "{$method} did not bind limit.");
+        assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, "{$method} calculated the wrong offset.");
+        assertSameValue(['data' => [['record_id' => 1]], 'total' => 17], $result, "{$method} returned the wrong page.");
+    }
+});
+
+test('Batch 4 view controller validates only schema-backed filters', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['dtr_publish_id' => 53]];
+    $controller = new DtrViewController(static fn (): DtrViewRepository => new DtrViewRepository($pdo));
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-dtr')
+        ->withQueryParams(['page' => '1', 'limit' => '15', 'gy_emp_code' => ' test1 ', 'year' => '2026', 'month' => '9']);
+    $response = $controller->employeeDtr($request, (new ResponseFactory())->createResponse());
+    $payload = responseJson($response);
+    assertSameValue(200, $response->getStatusCode(), 'Employee DTR returned the wrong status.');
+    assertSameValue(16, $payload['pagination']['totalRecords'], 'Employee DTR returned the wrong total.');
+    assertSameValue('test1', $payload['filters']['gyEmpCode'], 'Employee DTR did not normalize gy_emp_code.');
+    assertSameValue(2026, $payload['filters']['year'], 'Employee DTR omitted year filtering.');
+    assertSameValue(9, $payload['filters']['month'], 'Employee DTR omitted month filtering.');
+    assertTrue(!array_key_exists('dateFrom', $payload['filters']), 'Employee DTR exposed an invented date filter.');
+
+    foreach ([['account_id' => 'bad'], ['year' => '0'], ['month' => '13'], ['gy_emp_code' => '123456789012'], ['search' => ['bad']]] as $query) {
+        $created = false;
+        $invalidController = new DtrViewController(static function () use (&$created): DtrViewRepository { $created = true; return new DtrViewRepository(new EmployeeDirectoryRecordingPdo()); });
+        $invalid = $invalidController->employeeDtr((new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-dtr')->withQueryParams($query), (new ResponseFactory())->createResponse());
+        assertSameValue(400, $invalid->getStatusCode(), 'Invalid DTR filter was accepted.');
+        assertSameValue(false, $created, 'DTR repository ran before validation.');
+    }
+});
+
+test('Batch 4 optimized view routes require JWT', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): DtrViewRepository { $calls++; $pdo = new EmployeeDirectoryRecordingPdo(); $pdo->fetchResults[0] = ['total' => 0]; return new DtrViewRepository($pdo); };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, dtrViewRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/employee-dtr', '/api/v1/timesheet-assignment-view'];
+    foreach ($paths as $path) { assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected."); }
+    assertSameValue(0, $calls, 'DTR view repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) { $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth); assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed."); }
+    assertSameValue(2, $calls, 'DTR view routes did not dispatch once each.');
+});
+
+test('Batch 5 individual announcement resources use one safe explicit prepared lookup', function (): void {
+    $cases = [
+        ['findAnnouncementById', 61, ':announcement_id', 'SELECT gy_ann_id, gy_ann_serial, gy_ann_type, gy_ann_date, gy_ann_end, gy_ann_caption, gy_ann_attachment FROM gy_announce WHERE gy_ann_id = :announcement_id LIMIT 1'],
+        ['findConfirmationById', 62, ':confirmation_id', 'SELECT gy_conf_id, gy_conf_date, gy_conf_by, gy_ann_id FROM gy_confirm WHERE gy_conf_id = :confirmation_id LIMIT 1'],
+        ['findNotificationById', 63, ':notification_id', 'SELECT gy_notif_id, gy_notif_type, gy_user_code, gy_notif_text, gy_notif_date, gy_notif_ip FROM gy_notification WHERE gy_notif_id = :notification_id LIMIT 1'],
+    ];
+
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong field allowlist or lookup.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertTrue(!str_contains((string) $pdo->query, 'gy_password'), "{$method} selected a password.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 5 individual announcement routes are unique and JWT protected', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, individualResourceRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/announcements/61', '/api/v1/confirmations/62', '/api/v1/notifications/63'];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Batch 5 individual repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(3, $calls, 'Batch 5 individual routes did not dispatch once each.');
+});
+
+test('Batch 5 announcement relationships use one explicit prepared join per request', function (): void {
+    $singleCases = [
+        ['findCreatedByUserByAnnouncementId', 61, ':announcement_id', 'a.gy_ann_by = u.gy_user_id'],
+        ['findAnnouncementByConfirmationId', 62, ':confirmation_id', 'c.gy_ann_id = a.gy_ann_id'],
+        ['findUserByConfirmationId', 62, ':confirmation_id', 'TRIM(c.gy_conf_by) = TRIM(u.gy_user_code)'],
+        ['findUserByNotificationId', 63, ':notification_id', 'TRIM(n.gy_user_code) = TRIM(u.gy_user_code)'],
+    ];
+    foreach ($singleCases as [$method, $id, $placeholder, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => $id, '_related_id' => 7, 'public_code' => 'safe'];
+        $result = (new AnnouncementRelationshipRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertTrue(!str_contains((string) $pdo->query, 'gy_password'), "{$method} selected a password.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['public_code' => 'safe'], $result['data'], "{$method} exposed an internal relationship ID.");
+    }
+
+    $collectionCases = [
+        ['findAnnouncementsByUserCode', 'test1', 'gy_ann_id', 'a.gy_ann_by = u.gy_user_id'],
+        ['findConfirmationsByUserCode', 'test1', 'gy_conf_id', 'TRIM(c.gy_conf_by) = TRIM(u.gy_user_code)'],
+        ['findNotificationsByUserCode', 'test1', 'gy_notif_id', 'TRIM(n.gy_user_code) = TRIM(u.gy_user_code)'],
+        ['findConfirmationsByAnnouncementId', 61, 'gy_conf_id', 'c.gy_ann_id = a.gy_ann_id'],
+    ];
+    foreach ($collectionCases as [$method, $parent, $cursor, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 7, $cursor => 137]];
+        $result = (new AnnouncementRelationshipRepository($pdo))->{$method}($parent, 100);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertSameValue(['value' => 100, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        assertSameValue([[$cursor => 137]], $result['data'], "{$method} exposed an internal marker.");
+    }
+});
+
+test('Batch 5 announcement relationship routes require JWT and dispatch confirmed joins', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): AnnouncementRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 1, '_related_id' => 2, 'public_code' => 'safe'];
+        $pdo->fetchAllResult = [['_parent_id' => 1, 'gy_ann_id' => 61, 'gy_conf_id' => 62, 'gy_notif_id' => 63]];
+        $pdos[] = $pdo;
+        return new AnnouncementRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, announcementRelationshipRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $cases = [
+        ['/api/v1/users/test1/announcements', 'a.gy_ann_by = u.gy_user_id'],
+        ['/api/v1/users/test1/confirmations', 'TRIM(c.gy_conf_by) = TRIM(u.gy_user_code)'],
+        ['/api/v1/users/test1/notifications', 'TRIM(n.gy_user_code) = TRIM(u.gy_user_code)'],
+        ['/api/v1/announcements/61/created-by-user', 'a.gy_ann_by = u.gy_user_id'],
+        ['/api/v1/announcements/61/confirmations', 'c.gy_ann_id = a.gy_ann_id'],
+        ['/api/v1/confirmations/62/announcement', 'c.gy_ann_id = a.gy_ann_id'],
+        ['/api/v1/confirmations/62/user', 'TRIM(c.gy_conf_by) = TRIM(u.gy_user_code)'],
+        ['/api/v1/notifications/63/user', 'TRIM(n.gy_user_code) = TRIM(u.gy_user_code)'],
+    ];
+    foreach ($cases as [$path]) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Announcement relationship repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($cases as $index => [$path, $join]) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+        assertTrue(str_contains((string) $pdos[$index]->query, $join), "{$path} dispatched to the wrong join.");
+    }
+    assertSameValue(8, $calls, 'Announcement relationship routes did not dispatch once each.');
+});
+
+test('Batch 5 announcement feed uses confirmed filters aggregation and exactly two prepared queries', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 17];
+    $pdo->fetchAllResults[1] = [['announcement_id' => 61]];
+    $filters = ['gy_emp_code' => 'test1', 'search' => 'policy', 'date_from' => '2026-10-01', 'date_to' => '2026-10-31'];
+    $result = (new AnnouncementViewRepository($pdo))->findAnnouncementFeedPage(2, 15, $filters);
+
+    assertSameValue(2, count($pdo->queries), 'Announcement feed did not execute exactly two queries.');
+    assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total FROM gy_announce a'), 'Announcement feed count query is incorrect.');
+    assertTrue(!str_contains(strtoupper($pdo->queries[1]), 'SELECT *'), 'Announcement feed used SELECT *.');
+    assertTrue(str_contains($pdo->queries[1], 'LEFT JOIN gy_user creator ON a.gy_ann_by = creator.gy_user_id'), 'Announcement feed omitted creator data.');
+    assertTrue(str_contains($pdo->queries[1], 'COUNT(*) AS confirmation_count'), 'Announcement feed omitted SQL confirmation aggregation.');
+    assertTrue(str_contains($pdo->queries[1], 'TRIM(gy_conf_by) = TRIM(:gy_emp_code)'), 'Announcement feed omitted target-user confirmation status.');
+    assertTrue(str_contains($pdo->queries[1], 'a.gy_ann_date >= :date_from'), 'Announcement feed omitted start-date filtering.');
+    assertTrue(str_contains($pdo->queries[1], 'a.gy_ann_date < DATE_ADD(:date_to, INTERVAL 1 DAY)'), 'Announcement feed omitted inclusive end-date filtering.');
+    assertTrue(str_contains($pdo->queries[1], 'ORDER BY a.gy_ann_date DESC, a.gy_ann_id DESC LIMIT :limit OFFSET :offset'), 'Announcement feed uses the wrong ordering or pagination.');
+    assertTrue(!str_contains($pdo->queries[1], ':status'), 'Announcement feed invented a status filter.');
+    $projection = substr($pdo->queries[1], 0, strpos($pdo->queries[1], ' FROM '));
+    foreach (['a.gy_ann_by', 'creator.gy_user_id', 'gy_password'] as $forbidden) {
+        assertTrue(!str_contains($projection, $forbidden), "Announcement feed exposes {$forbidden}.");
+    }
+    assertSameValue(['value' => 'test1', 'type' => PDO::PARAM_STR], $pdo->bindings[1][':gy_emp_code'] ?? null, 'Announcement feed did not bind the target user code.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, 'Announcement feed did not bind limit.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, 'Announcement feed calculated the wrong offset.');
+    assertSameValue(['data' => [['announcement_id' => 61]], 'total' => 17], $result, 'Announcement feed returned the wrong page.');
+});
+
+test('Batch 5 announcement feed controller validates filters and route requires JWT', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['announcement_id' => 61]];
+    $controller = new AnnouncementViewController(static fn (): AnnouncementViewRepository => new AnnouncementViewRepository($pdo));
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/announcement-feed')
+        ->withQueryParams(['page' => '1', 'limit' => '15', 'gy_emp_code' => ' test1 ', 'search' => ' policy ', 'date_from' => '2026-10-01', 'date_to' => '2026-10-31']);
+    $response = $controller->index($request, (new ResponseFactory())->createResponse());
+    $payload = responseJson($response);
+    assertSameValue(200, $response->getStatusCode(), 'Announcement feed returned the wrong status.');
+    assertSameValue('test1', $payload['filters']['gyEmpCode'], 'Announcement feed did not normalize gy_emp_code.');
+    assertSameValue(16, $payload['pagination']['totalRecords'], 'Announcement feed returned the wrong total.');
+    assertTrue(!array_key_exists('status', $payload['filters']), 'Announcement feed exposed an invented status filter.');
+
+    foreach ([['gy_emp_code' => '123456789012'], ['search' => ['bad']], ['date_from' => '2026-02-30'], ['date_to' => '10/31/2026'], ['date_from' => '2026-10-31', 'date_to' => '2026-10-01']] as $query) {
+        $created = false;
+        $invalidController = new AnnouncementViewController(static function () use (&$created): AnnouncementViewRepository {
+            $created = true;
+            return new AnnouncementViewRepository(new EmployeeDirectoryRecordingPdo());
+        });
+        $invalid = $invalidController->index((new ServerRequestFactory())->createServerRequest('GET', '/api/v1/announcement-feed')->withQueryParams($query), (new ResponseFactory())->createResponse());
+        assertSameValue(400, $invalid->getStatusCode(), 'Invalid announcement feed filter was accepted.');
+        assertSameValue(false, $created, 'Announcement feed repository ran before validation.');
+    }
+
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): AnnouncementViewRepository {
+        $calls++;
+        $recording = new EmployeeDirectoryRecordingPdo();
+        $recording->fetchResults[0] = ['total' => 0];
+        return new AnnouncementViewRepository($recording);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, announcementViewRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $routeRequest = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/announcement-feed');
+    assertSameValue(401, $app->handle($routeRequest)->getStatusCode(), 'Announcement feed is not JWT protected.');
+    assertSameValue(0, $calls, 'Announcement feed repository ran before authorization.');
+    $authorized = $routeRequest->withHeader('Authorization', 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']));
+    assertSameValue(200, $app->handle($authorized)->getStatusCode(), 'Announcement feed rejected a valid JWT.');
+    assertSameValue(1, $calls, 'Announcement feed did not dispatch once.');
+});
+
+test('Batch 6 individual holiday resources use one explicit prepared lookup', function (): void {
+    $cases = [
+        ['findHolidayTypeById', 71, ':holiday_type_id', 'SELECT gy_hol_type_id, gy_hol_type_name, gy_hol_abbrv, gy_daybonus, gy_nightbonus, lateut, absnt, leaves, gy_day_start, gy_day_end, gy_night_start, gy_night_end, gy_hol_status FROM gy_holiday_types WHERE gy_hol_type_id = :holiday_type_id LIMIT 1'],
+        ['findHolidayById', 72, ':holiday_id', 'SELECT gy_hol_id, gy_hol_type_id, gy_hol_reg, gy_hol_title, gy_hol_date, gy_a_year, gy_hol_lastday, gy_hol_loc FROM gy_holiday_calendar WHERE gy_hol_id = :holiday_id LIMIT 1'],
+    ];
+
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong field allowlist or lookup.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 6 individual holiday routes are unique and JWT protected', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, individualResourceRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/holiday-types/71', '/api/v1/holidays/72'];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Batch 6 individual repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(2, $calls, 'Batch 6 individual routes did not dispatch once each.');
+});
+
+test('Batch 6 holiday relationships use confirmed explicit prepared joins', function (): void {
+    $collectionPdo = new RecordingPdo();
+    $collectionPdo->fetchAllResult = [['_parent_id' => 71, 'gy_hol_id' => 72]];
+    $collection = (new HolidayRelationshipRepository($collectionPdo))->findHolidaysByTypeId(71, 50);
+    assertSameValue(1, $collectionPdo->prepareCalls, 'Holiday type collection executed more than one query.');
+    assertTrue(str_contains((string) $collectionPdo->query, 'h.gy_hol_type_id = t.gy_hol_type_id'), 'Holiday type collection used the wrong join.');
+    assertTrue(str_contains((string) $collectionPdo->query, 'h.gy_hol_id > :after_id'), 'Holiday type collection omitted cursor filtering.');
+    assertTrue(str_contains((string) $collectionPdo->query, 'LIMIT 101'), 'Holiday type collection did not fetch 101 rows.');
+    assertSameValue(['value' => 71, 'type' => PDO::PARAM_INT], $collectionPdo->boundValues[':holiday_type_id'] ?? null, 'Holiday type ID was not bound.');
+    assertSameValue(['value' => 50, 'type' => PDO::PARAM_INT], $collectionPdo->boundValues[':after_id'] ?? null, 'Holiday cursor was not bound.');
+    assertSameValue([['gy_hol_id' => 72]], $collection['data'], 'Holiday relationship exposed an internal marker.');
+
+    $singlePdo = new RecordingPdo();
+    $singlePdo->fetchResult = ['_parent_id' => 72, '_related_id' => 71, 'gy_hol_type_id' => 71];
+    $single = (new HolidayRelationshipRepository($singlePdo))->findTypeByHolidayId(72);
+    assertSameValue(1, $singlePdo->prepareCalls, 'Holiday type lookup executed more than one query.');
+    assertTrue(str_contains((string) $singlePdo->query, 'h.gy_hol_type_id = t.gy_hol_type_id'), 'Holiday type lookup used the wrong join.');
+    assertTrue(!str_contains(strtoupper((string) $singlePdo->query), 'SELECT *'), 'Holiday type lookup used SELECT *.');
+    assertSameValue(['gy_hol_type_id' => 71], $single['data'], 'Holiday type lookup exposed an internal marker.');
+});
+
+test('Batch 6 holiday relationship routes require JWT and dispatch confirmed joins', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): HolidayRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 72, '_related_id' => 71, 'gy_hol_type_id' => 71];
+        $pdo->fetchAllResult = [['_parent_id' => 71, 'gy_hol_id' => 72]];
+        $pdos[] = $pdo;
+        return new HolidayRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, holidayRelationshipRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/holiday-types/71/holidays', '/api/v1/holidays/72/type'];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Holiday relationship repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $index => $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+        assertTrue(str_contains((string) $pdos[$index]->query, 'h.gy_hol_type_id = t.gy_hol_type_id'), "{$path} dispatched to the wrong join.");
+    }
+    assertSameValue(2, $calls, 'Holiday relationship routes did not dispatch once each.');
+});
+
+test('Batch 6 holiday calendar view uses schema-backed filters and exactly two prepared queries', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 17];
+    $pdo->fetchAllResults[1] = [['holiday_id' => 72]];
+    $filters = ['year' => 2026, 'date_from' => '2026-01-01', 'date_to' => '2026-12-31', 'location' => 1, 'holiday_type_id' => 71, 'search' => 'regular'];
+    $result = (new HolidayViewRepository($pdo))->findHolidayCalendarPage(2, 15, $filters);
+
+    assertSameValue(2, count($pdo->queries), 'Holiday calendar view did not execute exactly two queries.');
+    assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total FROM gy_holiday_calendar h INNER JOIN gy_holiday_types t'), 'Holiday calendar count query is incorrect.');
+    assertTrue(!str_contains(strtoupper($pdo->queries[1]), 'SELECT *'), 'Holiday calendar view used SELECT *.');
+    $expectedProjection = 'SELECT h.gy_hol_id, h.gy_hol_type_id, h.gy_hol_reg, h.gy_hol_title, '
+        . 'h.gy_hol_date, h.gy_a_year, h.gy_hol_lastday, h.gy_hol_loc, '
+        . 't.gy_hol_type_name, t.gy_hol_abbrv, t.gy_daybonus, t.gy_nightbonus, '
+        . 't.lateut, t.absnt, t.leaves, t.gy_day_start, t.gy_day_end, '
+        . 't.gy_night_start, t.gy_night_end ';
+    assertTrue(str_starts_with($pdo->queries[1], $expectedProjection), 'Holiday calendar view changed the requested response field names.');
+    assertTrue(str_contains($pdo->queries[1], 'h.gy_hol_type_id = t.gy_hol_type_id'), 'Holiday calendar view omitted its confirmed join.');
+    foreach (['h.gy_a_year = :year', 'h.gy_hol_date >= :date_from', 'h.gy_hol_date <= :date_to', 'h.gy_hol_loc = :location', 'h.gy_hol_type_id = :holiday_type_id'] as $condition) {
+        assertTrue(str_contains($pdo->queries[1], $condition), "Holiday calendar view omitted {$condition}.");
+    }
+    foreach (['h.gy_hol_title LIKE :search_0', 't.gy_hol_type_name LIKE :search_1', 't.gy_hol_abbrv LIKE :search_2'] as $condition) {
+        assertTrue(str_contains($pdo->queries[1], $condition), "Holiday calendar search omitted {$condition}.");
+    }
+    assertTrue(str_contains($pdo->queries[1], 'ORDER BY h.gy_hol_date ASC, h.gy_hol_id ASC LIMIT :limit OFFSET :offset'), 'Holiday calendar view uses the wrong ordering or pagination.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, 'Holiday calendar view did not bind limit.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, 'Holiday calendar view calculated the wrong offset.');
+    assertSameValue(['data' => [['holiday_id' => 72]], 'total' => 17], $result, 'Holiday calendar view returned the wrong page.');
+});
+
+test('Batch 6 holiday calendar controller validates filters and conflict-safe route requires JWT', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['holiday_id' => 72]];
+    $controller = new HolidayViewController(static fn (): HolidayViewRepository => new HolidayViewRepository($pdo));
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/holiday-calendar-view')
+        ->withQueryParams(['page' => '1', 'limit' => '15', 'year' => '2026', 'location' => '1', 'holiday_type_id' => '71', 'search' => ' regular ', 'date_from' => '2026-01-01', 'date_to' => '2026-12-31']);
+    $response = $controller->index($request, (new ResponseFactory())->createResponse());
+    $payload = responseJson($response);
+    assertSameValue(200, $response->getStatusCode(), 'Holiday calendar view returned the wrong status.');
+    assertSameValue(2026, $payload['filters']['year'], 'Holiday calendar view omitted year filtering.');
+    assertSameValue(1, $payload['filters']['location'], 'Holiday calendar view omitted location filtering.');
+    assertSameValue(16, $payload['pagination']['totalRecords'], 'Holiday calendar view returned the wrong total.');
+
+    foreach ([['year' => '0'], ['location' => '-1'], ['holiday_type_id' => 'bad'], ['search' => ['bad']], ['date_from' => '2026-02-30'], ['date_from' => '2026-12-31', 'date_to' => '2026-01-01']] as $query) {
+        $created = false;
+        $invalidController = new HolidayViewController(static function () use (&$created): HolidayViewRepository {
+            $created = true;
+            return new HolidayViewRepository(new EmployeeDirectoryRecordingPdo());
+        });
+        $invalid = $invalidController->index((new ServerRequestFactory())->createServerRequest('GET', '/api/v1/holiday-calendar-view')->withQueryParams($query), (new ResponseFactory())->createResponse());
+        assertSameValue(400, $invalid->getStatusCode(), 'Invalid holiday calendar filter was accepted.');
+        assertSameValue(false, $created, 'Holiday calendar repository ran before validation.');
+    }
+
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): HolidayViewRepository {
+        $calls++;
+        $recording = new EmployeeDirectoryRecordingPdo();
+        $recording->fetchResults[0] = ['total' => 0];
+        return new HolidayViewRepository($recording);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, holidayViewRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $routeRequest = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/holiday-calendar-view');
+    assertSameValue(401, $app->handle($routeRequest)->getStatusCode(), 'Holiday calendar view is not JWT protected.');
+    assertSameValue(0, $calls, 'Holiday calendar repository ran before authorization.');
+    $authorized = $routeRequest->withHeader('Authorization', 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']));
+    assertSameValue(200, $app->handle($authorized)->getStatusCode(), 'Holiday calendar view rejected a valid JWT.');
+    assertSameValue(1, $calls, 'Holiday calendar view did not dispatch once.');
+});
+
+test('Batch 7 individual QDS resources use one explicit prepared lookup', function (): void {
+    $cases = [
+        ['findQdsAssignGroupById', 81, ':qds_assign_group_id', 'SELECT qag_id, qag_sibsid, qag_account FROM qds_assign_group WHERE qag_id = :qds_assign_group_id LIMIT 1'],
+        ['findQdsQueryKeyById', 82, ':qds_query_key_id', 'SELECT qdsqk_id, kronos_key_name, query_key, audit_col_id FROM qds_querykey WHERE qdsqk_id = :qds_query_key_id LIMIT 1'],
+    ];
+
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong field allowlist or lookup.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 7 individual QDS routes are unique and JWT protected', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, individualResourceRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/qds-assign-groups/81', '/api/v1/qds-query-keys/82'];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Batch 7 individual repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(2, $calls, 'Batch 7 individual routes did not dispatch once each.');
+});
+
+test('Batch 7 QDS relationships use confirmed explicit prepared joins', function (): void {
+    $collectionCases = [
+        ['findAssignmentsByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'TRIM(q.qag_sibsid) = TRIM(e.gy_emp_code)'],
+        ['findAssignmentsByAccountId', 12, ':account_id', PDO::PARAM_INT, 'q.qag_account = a.gy_acc_id'],
+    ];
+    foreach ($collectionCases as [$method, $parent, $placeholder, $type, $join]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 7, 'qag_id' => 81]];
+        $result = (new QdsRelationshipRepository($pdo))->{$method}($parent, 50);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, 'q.qag_id > :after_id'), "{$method} omitted cursor filtering.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertSameValue(['value' => $parent, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its parent.");
+        assertSameValue(['value' => 50, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        assertSameValue([['qag_id' => 81]], $result['data'], "{$method} exposed an internal marker.");
+    }
+
+    $singleCases = [
+        ['findEmployeeByAssignmentId', 'TRIM(q.qag_sibsid) = TRIM(e.gy_emp_code)', 'gy_emp_code'],
+        ['findAccountByAssignmentId', 'q.qag_account = a.gy_acc_id', 'gy_acc_id'],
+    ];
+    foreach ($singleCases as [$method, $join, $relatedKey]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 81, '_related_id' => 7, $relatedKey => 'safe'];
+        $result = (new QdsRelationshipRepository($pdo))->{$method}(81);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => 81, 'type' => PDO::PARAM_INT], $pdo->boundValues[':qds_assign_group_id'] ?? null, "{$method} did not bind qag_id.");
+        assertSameValue([$relatedKey => 'safe'], $result['data'], "{$method} exposed an internal marker.");
+    }
+});
+
+test('Batch 7 QDS relationship routes require JWT and dispatch confirmed joins', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): QdsRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => 81, '_related_id' => 7, 'gy_emp_code' => 'test1', 'gy_acc_id' => 12];
+        $pdo->fetchAllResult = [['_parent_id' => 7, 'qag_id' => 81]];
+        $pdos[] = $pdo;
+        return new QdsRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, qdsRelationshipRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $cases = [
+        ['/api/v1/employees/test1/qds-assign-groups', 'TRIM(q.qag_sibsid) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/accounts/12/qds-assign-groups', 'q.qag_account = a.gy_acc_id'],
+        ['/api/v1/qds-assign-groups/81/employee', 'TRIM(q.qag_sibsid) = TRIM(e.gy_emp_code)'],
+        ['/api/v1/qds-assign-groups/81/account', 'q.qag_account = a.gy_acc_id'],
+    ];
+    foreach ($cases as [$path]) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'QDS relationship repository ran before authorization.');
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($cases as $index => [$path, $join]) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+        assertTrue(str_contains((string) $pdos[$index]->query, $join), "{$path} dispatched to the wrong join.");
+    }
+    assertSameValue(4, $calls, 'QDS relationship routes did not dispatch once each.');
+});
+
+test('Batch 7 QDS assignment view uses confirmed filters and exactly two prepared queries', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 17];
+    $pdo->fetchAllResults[1] = [['qag_id' => 81]];
+    $filters = ['gy_emp_code' => 'test1', 'account_id' => 12, 'search' => 'connect'];
+    $result = (new QdsViewRepository($pdo))->findAssignmentPage(2, 15, $filters);
+
+    assertSameValue(2, count($pdo->queries), 'QDS assignment view did not execute exactly two queries.');
+    assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total FROM qds_assign_group q INNER JOIN gy_employee e'), 'QDS assignment count query is incorrect.');
+    assertTrue(!str_contains(strtoupper($pdo->queries[1]), 'SELECT *'), 'QDS assignment view used SELECT *.');
+    assertTrue(str_contains($pdo->queries[1], 'TRIM(q.qag_sibsid) = TRIM(e.gy_emp_code)'), 'QDS assignment view omitted the employee join.');
+    assertTrue(str_contains($pdo->queries[1], 'q.qag_account = a.gy_acc_id'), 'QDS assignment view omitted the account join.');
+    assertTrue(str_contains($pdo->queries[1], 'TRIM(q.qag_sibsid) = :gy_emp_code'), 'QDS assignment view omitted employee filtering.');
+    assertTrue(str_contains($pdo->queries[1], 'a.gy_acc_id = :account_id'), 'QDS assignment view omitted account filtering.');
+    foreach (['q.qag_sibsid LIKE :search_0', 'e.gy_emp_fullname LIKE :search_1', 'a.gy_acc_name LIKE :search_2'] as $condition) {
+        assertTrue(str_contains($pdo->queries[1], $condition), "QDS assignment search omitted {$condition}.");
+    }
+    assertTrue(str_contains($pdo->queries[1], 'ORDER BY q.qag_id DESC LIMIT :limit OFFSET :offset'), 'QDS assignment view uses the wrong ordering or pagination.');
+    assertTrue(!str_contains($pdo->queries[1], ':status') && !str_contains($pdo->queries[1], ':date'), 'QDS assignment view invented unsupported filters.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, 'QDS assignment view did not bind limit.');
+    assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, 'QDS assignment view calculated the wrong offset.');
+    assertSameValue(['data' => [['qag_id' => 81]], 'total' => 17], $result, 'QDS assignment view returned the wrong page.');
+});
+
+test('Batch 7 QDS view controller validates filters and route requires JWT', function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = ['total' => 16];
+    $pdo->fetchAllResults[1] = [['qag_id' => 81]];
+    $controller = new QdsViewController(static fn (): QdsViewRepository => new QdsViewRepository($pdo));
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/qds-assignment-view')
+        ->withQueryParams(['page' => '1', 'limit' => '15', 'gy_emp_code' => ' test1 ', 'account_id' => '12', 'search' => ' connect ']);
+    $response = $controller->index($request, (new ResponseFactory())->createResponse());
+    $payload = responseJson($response);
+    assertSameValue(200, $response->getStatusCode(), 'QDS assignment view returned the wrong status.');
+    assertSameValue('test1', $payload['filters']['gyEmpCode'], 'QDS assignment view did not normalize employee code.');
+    assertSameValue(12, $payload['filters']['accountId'], 'QDS assignment view omitted account filtering.');
+    assertSameValue(16, $payload['pagination']['totalRecords'], 'QDS assignment view returned the wrong total.');
+
+    foreach ([['gy_emp_code' => '123456789012'], ['account_id' => 'bad'], ['search' => ['bad']]] as $query) {
+        $created = false;
+        $invalidController = new QdsViewController(static function () use (&$created): QdsViewRepository {
+            $created = true;
+            return new QdsViewRepository(new EmployeeDirectoryRecordingPdo());
+        });
+        $invalid = $invalidController->index((new ServerRequestFactory())->createServerRequest('GET', '/api/v1/qds-assignment-view')->withQueryParams($query), (new ResponseFactory())->createResponse());
+        assertSameValue(400, $invalid->getStatusCode(), 'Invalid QDS assignment filter was accepted.');
+        assertSameValue(false, $created, 'QDS assignment repository ran before validation.');
+    }
+
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): QdsViewRepository {
+        $calls++;
+        $recording = new EmployeeDirectoryRecordingPdo();
+        $recording->fetchResults[0] = ['total' => 0];
+        return new QdsViewRepository($recording);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, qdsViewRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $routeRequest = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/qds-assignment-view');
+    assertSameValue(401, $app->handle($routeRequest)->getStatusCode(), 'QDS assignment view is not JWT protected.');
+    assertSameValue(0, $calls, 'QDS assignment repository ran before authorization.');
+    $authorized = $routeRequest->withHeader('Authorization', 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']));
+    assertSameValue(200, $app->handle($authorized)->getStatusCode(), 'QDS assignment view rejected a valid JWT.');
+    assertSameValue(1, $calls, 'QDS assignment view did not dispatch once.');
+});
+
+test('Batch 8 individual team resources use one explicit prepared lookup', function (): void {
+    $cases = [
+        ['findTeamToolById', 91, ':team_id', 'SELECT team_id, team_name, team_owner, team_switch FROM team_toollist WHERE team_id = :team_id LIMIT 1'],
+        ['findTeamColumnById', 92, ':col_id', 'SELECT col_id, team_id, col_val, col_type, col_status, col_order FROM team_collist WHERE col_id = :col_id LIMIT 1'],
+        ['findTeamDataById', 93, ':data_id', 'SELECT data_id, col_id, row_id, tool_id, data_value FROM team_data WHERE data_id = :data_id LIMIT 1'],
+    ];
+
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong field allowlist or lookup.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 8 individual team routes are JWT protected and dispatch once', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, individualResourceRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/team-tools/91', '/api/v1/team-columns/92', '/api/v1/team-data/93'];
+
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Batch 8 individual repository ran before authorization.');
+
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(3, $calls, 'Batch 8 individual routes did not dispatch once each.');
+});
+
+test('Batch 8 team relationships use only the six confirmed explicit prepared joins', function (): void {
+    $collectionCases = [
+        ['findColumnsByTeamId', 91, 'c.team_id = t.team_id', 'c.col_id', 'col_id'],
+        ['findDataByTeamId', 91, 'd.tool_id = t.team_id', 'd.data_id', 'data_id'],
+        ['findDataByColumnId', 92, 'd.col_id = c.col_id', 'd.data_id', 'data_id'],
+    ];
+    foreach ($collectionCases as [$method, $parentId, $join, $cursorSql, $resultKey]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => $parentId, $resultKey => 101]];
+        $result = (new TeamToolRelationshipRepository($pdo))->{$method}($parentId, 50);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, "{$cursorSql} > :after_id"), "{$method} omitted cursor filtering.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $parentId, 'type' => PDO::PARAM_INT], $pdo->boundValues[':parent_id'] ?? null, "{$method} did not bind its parent.");
+        assertSameValue(['value' => 50, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        assertSameValue([[$resultKey => 101]], $result['data'], "{$method} exposed an internal marker.");
+    }
+
+    $singleCases = [
+        ['findTeamToolByColumnId', 92, 'c.team_id = t.team_id', 'team_id'],
+        ['findTeamToolByDataId', 93, 'd.tool_id = t.team_id', 'team_id'],
+        ['findColumnByDataId', 93, 'd.col_id = c.col_id', 'col_id'],
+    ];
+    foreach ($singleCases as [$method, $parentId, $join, $relatedKey]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => $parentId, '_related_id' => 7, $relatedKey => 7];
+        $result = (new TeamToolRelationshipRepository($pdo))->{$method}($parentId);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $parentId, 'type' => PDO::PARAM_INT], $pdo->boundValues[':parent_id'] ?? null, "{$method} did not bind its parent.");
+        assertSameValue([$relatedKey => 7], $result['data'], "{$method} exposed an internal marker.");
+    }
+});
+
+test('Batch 8 team relationship pagination uses actual IDs and all routes require JWT', function (): void {
+    $paginationPdo = new RecordingPdo();
+    for ($index = 0; $index < 101; $index++) {
+        $paginationPdo->fetchAllResult[] = ['_parent_id' => 91, 'col_id' => 200 + ($index * 3)];
+    }
+    $controller = new TeamToolRelationshipController(
+        static fn (): TeamToolRelationshipRepository => new TeamToolRelationshipRepository($paginationPdo)
+    );
+    $response = $controller->teamToolColumns(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/team-tools/91/columns?after_id=-4')->withQueryParams(['after_id' => '-4']),
+        (new ResponseFactory())->createResponse(),
+        ['team_id' => '91']
+    );
+    $payload = responseJson($response);
+    assertSameValue(100, count($payload['data']), 'Team column relationship returned more than 100 rows.');
+    assertSameValue(497, $payload['pagination']['next_cursor'], 'Team column relationship did not use the actual last col_id.');
+    assertSameValue(true, $payload['pagination']['has_more'], 'Team column relationship did not detect row 101.');
+    assertSameValue(0, $payload['pagination']['current_cursor'], 'Negative cursor was not normalized.');
+
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): TeamToolRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 91, 'col_id' => 92, 'data_id' => 93]];
+        $pdo->fetchResult = ['_parent_id' => 93, '_related_id' => 91, 'team_id' => 91, 'col_id' => 92];
+        $pdos[] = $pdo;
+        return new TeamToolRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, teamToolRelationshipRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = [
+        '/api/v1/team-tools/91/columns',
+        '/api/v1/team-tools/91/data',
+        '/api/v1/team-columns/92/team-tool',
+        '/api/v1/team-columns/92/data',
+        '/api/v1/team-data/93/team-tool',
+        '/api/v1/team-data/93/column',
+    ];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Team relationship repository ran before authorization.');
+
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(6, $calls, 'Team relationship routes did not dispatch once each.');
+
+    foreach ($pdos as $pdo) {
+        assertTrue(!str_contains((string) $pdo->query, 'tool_list'), 'Team data was incorrectly joined to tool_list.');
+        assertTrue(!str_contains((string) $pdo->query, 'tool_details'), 'Team relationship touched tool_details.');
+        assertTrue(!str_contains((string) $pdo->query, 'tool_data'), 'Team relationship touched tool_data.');
+    }
+});
+
+test('Batch 9 individual generic tool resources use one explicit prepared lookup', function (): void {
+    $cases = [
+        ['findToolById', 101, ':tool_id', 'SELECT tool_id, tool_name, tool_status FROM tool_list WHERE tool_id = :tool_id LIMIT 1'],
+        ['findToolDetailById', 102, ':toold_id', 'SELECT toold_id, toold_sortid, toold_listid, toold_label, toold_type, toold_status FROM tool_details WHERE toold_id = :toold_id LIMIT 1'],
+        ['findToolDataById', 103, ':td_id', 'SELECT td_id, td_tooldid, td_emp_code, td_value, td_status FROM tool_data WHERE td_id = :td_id LIMIT 1'],
+    ];
+
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong field allowlist or lookup.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 9 individual generic tool routes are JWT protected and dispatch once', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, individualResourceRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = ['/api/v1/tools/101', '/api/v1/tool-details/102', '/api/v1/tool-data/103'];
+
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Batch 9 individual repository ran before authorization.');
+
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(3, $calls, 'Batch 9 individual routes did not dispatch once each.');
+});
+
+test('Batch 9 generic tool relationships use only confirmed explicit prepared joins', function (): void {
+    $collectionCases = [
+        ['findDataByEmployeeCode', 'test1', ':employee_code', PDO::PARAM_STR, 'TRIM(td.td_emp_code) = TRIM(e.gy_emp_code)', 'td.td_id', 'td_id'],
+        ['findDetailsByToolId', 101, ':parent_id', PDO::PARAM_INT, 'd.toold_listid = t.tool_id', 'd.toold_id', 'toold_id'],
+        ['findDataByToolDetailId', 102, ':parent_id', PDO::PARAM_INT, 'td.td_tooldid = d.toold_id', 'td.td_id', 'td_id'],
+    ];
+    foreach ($collectionCases as [$method, $parent, $placeholder, $type, $join, $cursorSql, $resultKey]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 1, $resultKey => 111]];
+        $result = (new ToolRelationshipRepository($pdo))->{$method}($parent, 50);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(str_contains((string) $pdo->query, "{$cursorSql} > :after_id"), "{$method} omitted cursor filtering.");
+        assertTrue(str_contains((string) $pdo->query, 'LIMIT 101'), "{$method} did not fetch 101 rows.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $parent, 'type' => $type], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its parent.");
+        assertSameValue(['value' => 50, 'type' => PDO::PARAM_INT], $pdo->boundValues[':after_id'] ?? null, "{$method} did not bind its cursor.");
+        assertSameValue([[$resultKey => 111]], $result['data'], "{$method} exposed an internal marker.");
+    }
+
+    $singleCases = [
+        ['findToolByDetailId', 102, 'd.toold_listid = t.tool_id', 'tool_id'],
+        ['findDetailByDataId', 103, 'td.td_tooldid = d.toold_id', 'toold_id'],
+        ['findEmployeeByDataId', 103, 'TRIM(td.td_emp_code) = TRIM(e.gy_emp_code)', 'gy_emp_code'],
+    ];
+    foreach ($singleCases as [$method, $parentId, $join, $relatedKey]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['_parent_id' => $parentId, '_related_id' => 7, $relatedKey => 'safe'];
+        $result = (new ToolRelationshipRepository($pdo))->{$method}($parentId);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertTrue(str_contains((string) $pdo->query, $join), "{$method} used the wrong join.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $parentId, 'type' => PDO::PARAM_INT], $pdo->boundValues[':parent_id'] ?? null, "{$method} did not bind its parent.");
+        assertSameValue([$relatedKey => 'safe'], $result['data'], "{$method} exposed an internal marker.");
+
+        $query = (string) $pdo->query;
+        assertTrue(!str_contains($query, 'team_toollist') && !str_contains($query, 'team_collist') && !str_contains($query, 'team_data'), "{$method} crossed into the team tool model.");
+    }
+
+    $employeePdo = new RecordingPdo();
+    $employeePdo->fetchResult = ['_parent_id' => 103, '_related_id' => 7, 'gy_emp_code' => 'test1'];
+    (new ToolRelationshipRepository($employeePdo))->findEmployeeByDataId(103);
+    $employeeProjection = substr((string) $employeePdo->query, 0, strpos((string) $employeePdo->query, ' FROM '));
+    foreach (['gy_emp_code', 'gy_emp_email', 'gy_emp_lname', 'gy_emp_fname', 'gy_emp_mname', 'gy_emp_fullname', 'gy_last_working_day'] as $field) {
+        assertTrue(str_contains($employeeProjection, $field), "Tool data employee omitted safe field {$field}.");
+    }
+    foreach (['password', 'secret', 'token', 'gy_username'] as $forbidden) {
+        assertTrue(!str_contains(strtolower($employeeProjection), $forbidden), "Tool data employee exposed {$forbidden}.");
+    }
+});
+
+test('Batch 9 generic tool pagination uses actual IDs and all relationship routes require JWT', function (): void {
+    $paginationPdo = new RecordingPdo();
+    for ($index = 0; $index < 101; $index++) {
+        $paginationPdo->fetchAllResult[] = ['_parent_id' => 101, 'toold_id' => 300 + ($index * 4)];
+    }
+    $controller = new ToolRelationshipController(
+        static fn (): ToolRelationshipRepository => new ToolRelationshipRepository($paginationPdo)
+    );
+    $response = $controller->toolDetails(
+        (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/tools/101/details?after_id=-9')->withQueryParams(['after_id' => '-9']),
+        (new ResponseFactory())->createResponse(),
+        ['tool_id' => '101']
+    );
+    $payload = responseJson($response);
+    assertSameValue(100, count($payload['data']), 'Tool details relationship returned more than 100 rows.');
+    assertSameValue(696, $payload['pagination']['next_cursor'], 'Tool details relationship did not use the actual last toold_id.');
+    assertSameValue(true, $payload['pagination']['has_more'], 'Tool details relationship did not detect row 101.');
+    assertSameValue(0, $payload['pagination']['current_cursor'], 'Negative cursor was not normalized.');
+
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): ToolRelationshipRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchAllResult = [['_parent_id' => 101, 'toold_id' => 102, 'td_id' => 103]];
+        $pdo->fetchResult = ['_parent_id' => 103, '_related_id' => 101, 'tool_id' => 101, 'toold_id' => 102, 'gy_emp_code' => 'test1'];
+        $pdos[] = $pdo;
+        return new ToolRelationshipRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, toolRelationshipRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = [
+        '/api/v1/employees/test1/tool-data',
+        '/api/v1/tools/101/details',
+        '/api/v1/tool-details/102/tool',
+        '/api/v1/tool-details/102/data',
+        '/api/v1/tool-data/103/tool-detail',
+        '/api/v1/tool-data/103/employee',
+    ];
+    foreach ($paths as $path) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Tool relationship repository ran before authorization.');
+
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $path) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+    }
+    assertSameValue(6, $calls, 'Tool relationship routes did not dispatch once each.');
+
+    foreach ($pdos as $pdo) {
+        $query = (string) $pdo->query;
+        assertTrue(!str_contains($query, 'team_toollist') && !str_contains($query, 'team_collist') && !str_contains($query, 'team_data'), 'Generic tool relationship crossed into the team tool model.');
+    }
+});
+
+test('Batch 10 standalone resources use one explicit prepared lookup', function (): void {
+    $cases = [
+        [
+            'findRequestById',
+            111,
+            ':request_id',
+            'SELECT gy_req_id, gy_req_code, gy_req_date, gy_req_status, gy_req_by, gy_emp_code, '
+                . 'gy_emp_fullname, gy_sched_day, gy_sched_mode, gy_sched_login, gy_sched_breakout, '
+                . 'gy_sched_breakin, gy_sched_logout, gy_req_reason FROM gy_request '
+                . 'WHERE gy_req_id = :request_id LIMIT 1',
+        ],
+        [
+            'findTemporarySupervisorById',
+            112,
+            ':temporary_supervisor_id',
+            'SELECT temp_sup_id, temp_sup_code, temp_sup_date, temp_sup_by FROM gy_temp_sup '
+                . 'WHERE temp_sup_id = :temporary_supervisor_id LIMIT 1',
+        ],
+        [
+            'findDobRegistrationById',
+            113,
+            ':dob_registration_id',
+            'SELECT dob_id, dob_reg_for, dob_reg_from, dob_message, dob_read, dob_date FROM dob_reg '
+                . 'WHERE dob_id = :dob_registration_id LIMIT 1',
+        ],
+        [
+            'findWhitelistEntryById',
+            114,
+            ':whitelist_id',
+            'SELECT id, sibs_id, ip, details FROM gy_whitelist WHERE id = :whitelist_id LIMIT 1',
+        ],
+        [
+            'findReasonById',
+            115,
+            ':reason_id',
+            'SELECT gy_reason_id, gy_reason_name FROM gy_reason WHERE gy_reason_id = :reason_id LIMIT 1',
+        ],
+    ];
+
+    foreach ($cases as [$method, $id, $placeholder, $expectedQuery]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => $id];
+        $result = (new IndividualResourceRepository($pdo))->{$method}($id);
+        assertSameValue(1, $pdo->prepareCalls, "{$method} executed more than one query.");
+        assertSameValue($expectedQuery, $pdo->query, "{$method} used the wrong field allowlist or lookup.");
+        assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), "{$method} used SELECT *.");
+        assertSameValue(['value' => $id, 'type' => PDO::PARAM_INT], $pdo->boundValues[$placeholder] ?? null, "{$method} did not bind its identifier.");
+        assertSameValue(['resource_id' => $id], $result, "{$method} returned the wrong record.");
+    }
+});
+
+test('Batch 10 standalone routes validate identifiers and are JWT protected', function (): void {
+    $invalidCases = [
+        ['request', ['gy_req_id' => '0']],
+        ['temporarySupervisor', ['temp_sup_id' => '-1']],
+        ['dobRegistration', ['dob_id' => 'bad']],
+        ['whitelistEntry', ['id' => '0']],
+        ['reason', ['gy_reason_id' => 'invalid']],
+    ];
+    foreach ($invalidCases as [$method, $arguments]) {
+        $created = false;
+        $controller = new IndividualResourceController(
+            static function () use (&$created): IndividualResourceRepository {
+                $created = true;
+                return new IndividualResourceRepository(new RecordingPdo());
+            }
+        );
+        $response = $controller->{$method}(
+            (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/resource/invalid'),
+            (new ResponseFactory())->createResponse(),
+            $arguments
+        );
+        assertSameValue(400, $response->getStatusCode(), "{$method} accepted an invalid identifier.");
+        assertSameValue(false, $created, "{$method} queried before validation.");
+    }
+
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $pdos = [];
+    $factory = static function () use (&$calls, &$pdos): IndividualResourceRepository {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = ['resource_id' => 1];
+        $pdos[] = $pdo;
+        return new IndividualResourceRepository($pdo);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()), apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()), jwtServiceFactory: static fn (): JwtService => $jwtService, individualResourceRepositoryFactory: $factory);
+    $app->addRoutingMiddleware();
+    $paths = [
+        ['/api/v1/requests/111', 'FROM gy_request'],
+        ['/api/v1/temporary-supervisors/112', 'FROM gy_temp_sup'],
+        ['/api/v1/dob-registrations/113', 'FROM dob_reg'],
+        ['/api/v1/whitelist/114', 'FROM gy_whitelist'],
+        ['/api/v1/reasons/115', 'FROM gy_reason'],
+    ];
+
+    foreach ($paths as [$path]) {
+        assertSameValue(401, $app->handle((new ServerRequestFactory())->createServerRequest('GET', $path))->getStatusCode(), "{$path} is not JWT protected.");
+    }
+    assertSameValue(0, $calls, 'Batch 10 repository ran before authorization.');
+
+    $auth = 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS']);
+    foreach ($paths as $index => [$path, $tableFragment]) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $path)->withHeader('Authorization', $auth);
+        assertSameValue(200, $app->handle($request)->getStatusCode(), "Authorized {$path} failed.");
+        assertTrue(str_contains((string) $pdos[$index]->query, $tableFragment), "{$path} dispatched to the wrong lookup.");
+    }
+    assertSameValue(5, $calls, 'Batch 10 routes did not dispatch exactly once each.');
+});
+
+test('Batch 10 missing standalone resources return sanitized 404 responses', function (): void {
+    $cases = [
+        ['request', ['gy_req_id' => '111']],
+        ['temporarySupervisor', ['temp_sup_id' => '112']],
+        ['dobRegistration', ['dob_id' => '113']],
+        ['whitelistEntry', ['id' => '114']],
+        ['reason', ['gy_reason_id' => '115']],
+    ];
+
+    foreach ($cases as [$method, $arguments]) {
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = false;
+        $controller = new IndividualResourceController(
+            static fn (): IndividualResourceRepository => new IndividualResourceRepository($pdo)
+        );
+        $response = $controller->{$method}(
+            (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/resource/missing'),
+            (new ResponseFactory())->createResponse(),
+            $arguments
+        );
+        assertSameValue(404, $response->getStatusCode(), "{$method} did not return 404 for a missing record.");
+        assertSameValue(['success' => false, 'message' => 'Resource not found.'], responseJson($response), "{$method} exposed unexpected details.");
+    }
 });
