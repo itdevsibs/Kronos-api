@@ -113,6 +113,47 @@ final class IndividualResourceRepository
         . 'gy_hol_date, gy_a_year, gy_hol_lastday, gy_hol_loc FROM gy_holiday_calendar '
         . 'WHERE gy_hol_id = :holiday_id LIMIT 1';
 
+    private const QDS_ASSIGN_GROUP_QUERY = 'SELECT qag_id, qag_sibsid, qag_account '
+        . 'FROM qds_assign_group WHERE qag_id = :qds_assign_group_id LIMIT 1';
+
+    private const QDS_QUERY_KEY_QUERY = 'SELECT qdsqk_id, kronos_key_name, query_key, audit_col_id '
+        . 'FROM qds_querykey WHERE qdsqk_id = :qds_query_key_id LIMIT 1';
+
+    private const TEAM_TOOL_QUERY = 'SELECT team_id, team_name, team_owner, team_switch '
+        . 'FROM team_toollist WHERE team_id = :team_id LIMIT 1';
+
+    private const TEAM_COLUMN_QUERY = 'SELECT col_id, team_id, col_val, col_type, col_status, col_order '
+        . 'FROM team_collist WHERE col_id = :col_id LIMIT 1';
+
+    private const TEAM_DATA_QUERY = 'SELECT data_id, col_id, row_id, tool_id, data_value '
+        . 'FROM team_data WHERE data_id = :data_id LIMIT 1';
+
+    private const TOOL_QUERY = 'SELECT tool_id, tool_name, tool_status '
+        . 'FROM tool_list WHERE tool_id = :tool_id LIMIT 1';
+
+    private const TOOL_DETAIL_QUERY = 'SELECT toold_id, toold_sortid, toold_listid, toold_label, '
+        . 'toold_type, toold_status FROM tool_details WHERE toold_id = :toold_id LIMIT 1';
+
+    private const TOOL_DATA_QUERY = 'SELECT td_id, td_tooldid, td_emp_code, td_value, td_status '
+        . 'FROM tool_data WHERE td_id = :td_id LIMIT 1';
+
+    private const REQUEST_QUERY = 'SELECT gy_req_id, gy_req_code, gy_req_date, gy_req_status, gy_req_by, '
+        . 'gy_emp_code, gy_emp_fullname, gy_sched_day, gy_sched_mode, gy_sched_login, gy_sched_breakout, '
+        . 'gy_sched_breakin, gy_sched_logout, gy_req_reason FROM gy_request '
+        . 'WHERE gy_req_id = :request_id LIMIT 1';
+
+    private const TEMPORARY_SUPERVISOR_QUERY = 'SELECT temp_sup_id, temp_sup_code, temp_sup_date, temp_sup_by '
+        . 'FROM gy_temp_sup WHERE temp_sup_id = :temporary_supervisor_id LIMIT 1';
+
+    private const DOB_REGISTRATION_QUERY = 'SELECT dob_id, dob_reg_for, dob_reg_from, dob_message, dob_read, '
+        . 'dob_date FROM dob_reg WHERE dob_id = :dob_registration_id LIMIT 1';
+
+    private const WHITELIST_ENTRY_QUERY = 'SELECT id, sibs_id, ip, details FROM gy_whitelist '
+        . 'WHERE id = :whitelist_id LIMIT 1';
+
+    private const REASON_QUERY = 'SELECT gy_reason_id, gy_reason_name FROM gy_reason '
+        . 'WHERE gy_reason_id = :reason_id LIMIT 1';
+
     public function __construct(private readonly PDO $pdo)
     {
     }
@@ -271,6 +312,99 @@ final class IndividualResourceRepository
     public function findHolidayById(int $holidayId): ?array
     {
         return $this->findOne(self::HOLIDAY_QUERY, ':holiday_id', $holidayId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findQdsAssignGroupById(int $assignmentId): ?array
+    {
+        return $this->findOne(
+            self::QDS_ASSIGN_GROUP_QUERY,
+            ':qds_assign_group_id',
+            $assignmentId,
+            PDO::PARAM_INT
+        );
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findQdsQueryKeyById(int $queryKeyId): ?array
+    {
+        return $this->findOne(self::QDS_QUERY_KEY_QUERY, ':qds_query_key_id', $queryKeyId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findTeamToolById(int $teamId): ?array
+    {
+        return $this->findOne(self::TEAM_TOOL_QUERY, ':team_id', $teamId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findTeamColumnById(int $columnId): ?array
+    {
+        return $this->findOne(self::TEAM_COLUMN_QUERY, ':col_id', $columnId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findTeamDataById(int $dataId): ?array
+    {
+        return $this->findOne(self::TEAM_DATA_QUERY, ':data_id', $dataId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findToolById(int $toolId): ?array
+    {
+        return $this->findOne(self::TOOL_QUERY, ':tool_id', $toolId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findToolDetailById(int $toolDetailId): ?array
+    {
+        return $this->findOne(self::TOOL_DETAIL_QUERY, ':toold_id', $toolDetailId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findToolDataById(int $toolDataId): ?array
+    {
+        return $this->findOne(self::TOOL_DATA_QUERY, ':td_id', $toolDataId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findRequestById(int $requestId): ?array
+    {
+        return $this->findOne(self::REQUEST_QUERY, ':request_id', $requestId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findTemporarySupervisorById(int $temporarySupervisorId): ?array
+    {
+        return $this->findOne(
+            self::TEMPORARY_SUPERVISOR_QUERY,
+            ':temporary_supervisor_id',
+            $temporarySupervisorId,
+            PDO::PARAM_INT
+        );
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findDobRegistrationById(int $dobRegistrationId): ?array
+    {
+        return $this->findOne(
+            self::DOB_REGISTRATION_QUERY,
+            ':dob_registration_id',
+            $dobRegistrationId,
+            PDO::PARAM_INT
+        );
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findWhitelistEntryById(int $whitelistId): ?array
+    {
+        return $this->findOne(self::WHITELIST_ENTRY_QUERY, ':whitelist_id', $whitelistId, PDO::PARAM_INT);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findReasonById(int $reasonId): ?array
+    {
+        return $this->findOne(self::REASON_QUERY, ':reason_id', $reasonId, PDO::PARAM_INT);
     }
 
     /** @return array<string, mixed>|null */

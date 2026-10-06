@@ -29,6 +29,10 @@ use Sibs\KronosApi\Controller\HolidayRelationshipController;
 use Sibs\KronosApi\Controller\HolidayViewController;
 use Sibs\KronosApi\Controller\LeaveRelationshipController;
 use Sibs\KronosApi\Controller\LeaveViewController;
+use Sibs\KronosApi\Controller\QdsRelationshipController;
+use Sibs\KronosApi\Controller\QdsViewController;
+use Sibs\KronosApi\Controller\TeamToolRelationshipController;
+use Sibs\KronosApi\Controller\ToolRelationshipController;
 use Sibs\KronosApi\Controller\UserController;
 use Sibs\KronosApi\Controller\WorkforceRelationshipController;
 use Sibs\KronosApi\Controller\WorkforceViewController;
@@ -58,6 +62,10 @@ use Sibs\KronosApi\Repository\HolidayRelationshipRepository;
 use Sibs\KronosApi\Repository\HolidayViewRepository;
 use Sibs\KronosApi\Repository\LeaveRelationshipRepository;
 use Sibs\KronosApi\Repository\LeaveViewRepository;
+use Sibs\KronosApi\Repository\QdsRelationshipRepository;
+use Sibs\KronosApi\Repository\QdsViewRepository;
+use Sibs\KronosApi\Repository\TeamToolRelationshipRepository;
+use Sibs\KronosApi\Repository\ToolRelationshipRepository;
 use Sibs\KronosApi\Repository\UserRepository;
 use Sibs\KronosApi\Repository\WorkforceRelationshipRepository;
 use Sibs\KronosApi\Repository\WorkforceViewRepository;
@@ -95,7 +103,11 @@ return function (
     ?\Closure $announcementRelationshipRepositoryFactory = null,
     ?\Closure $announcementViewRepositoryFactory = null,
     ?\Closure $holidayRelationshipRepositoryFactory = null,
-    ?\Closure $holidayViewRepositoryFactory = null
+    ?\Closure $holidayViewRepositoryFactory = null,
+    ?\Closure $qdsRelationshipRepositoryFactory = null,
+    ?\Closure $qdsViewRepositoryFactory = null,
+    ?\Closure $teamToolRelationshipRepositoryFactory = null,
+    ?\Closure $toolRelationshipRepositoryFactory = null
 ): void {
 
     $serviceFactory ??= static fn (): ApiClientService => new ApiClientService(
@@ -408,6 +420,42 @@ return function (
     );
     $holidayViewController = new HolidayViewController($holidayViewRepositoryFactory);
 
+    $qdsRelationshipRepositoryFactory ??= static fn (): QdsRelationshipRepository => new QdsRelationshipRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'), 'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'), 'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $qdsRelationshipController = new QdsRelationshipController($qdsRelationshipRepositoryFactory);
+
+    $qdsViewRepositoryFactory ??= static fn (): QdsViewRepository => new QdsViewRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'), 'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'), 'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $qdsViewController = new QdsViewController($qdsViewRepositoryFactory);
+
+    $teamToolRelationshipRepositoryFactory ??= static fn (): TeamToolRelationshipRepository => new TeamToolRelationshipRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'), 'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'), 'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $teamToolRelationshipController = new TeamToolRelationshipController($teamToolRelationshipRepositoryFactory);
+
+    $toolRelationshipRepositoryFactory ??= static fn (): ToolRelationshipRepository => new ToolRelationshipRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'), 'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'), 'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $toolRelationshipController = new ToolRelationshipController($toolRelationshipRepositoryFactory);
+
     $app->post(
         '/api/v1/api-clients',
         [$apiClientController, 'create']
@@ -503,6 +551,19 @@ return function (
         ['/api/v1/notifications/{gy_notif_id}', 'notification'],
         ['/api/v1/holiday-types/{gy_hol_type_id}', 'holidayType'],
         ['/api/v1/holidays/{gy_hol_id}', 'holiday'],
+        ['/api/v1/qds-assign-groups/{qag_id}', 'qdsAssignGroup'],
+        ['/api/v1/qds-query-keys/{qdsqk_id}', 'qdsQueryKey'],
+        ['/api/v1/team-tools/{team_id}', 'teamTool'],
+        ['/api/v1/team-columns/{col_id}', 'teamColumn'],
+        ['/api/v1/team-data/{data_id}', 'teamData'],
+        ['/api/v1/tools/{tool_id}', 'tool'],
+        ['/api/v1/tool-details/{toold_id}', 'toolDetail'],
+        ['/api/v1/tool-data/{td_id}', 'toolData'],
+        ['/api/v1/requests/{gy_req_id}', 'request'],
+        ['/api/v1/temporary-supervisors/{temp_sup_id}', 'temporarySupervisor'],
+        ['/api/v1/dob-registrations/{dob_id}', 'dobRegistration'],
+        ['/api/v1/whitelist/{id}', 'whitelistEntry'],
+        ['/api/v1/reasons/{gy_reason_id}', 'reason'],
     ];
 
     foreach ($individualResourceRoutes as [$path, $method]) {
@@ -630,6 +691,54 @@ return function (
         $jwtService,
         $app->getResponseFactory()
     ));
+
+    $qdsRelationshipRoutes = [
+        ['/api/v1/employees/{gy_emp_code}/qds-assign-groups', 'employeeAssignments'],
+        ['/api/v1/accounts/{gy_acc_id}/qds-assign-groups', 'accountAssignments'],
+        ['/api/v1/qds-assign-groups/{qag_id}/employee', 'assignmentEmployee'],
+        ['/api/v1/qds-assign-groups/{qag_id}/account', 'assignmentAccount'],
+    ];
+    foreach ($qdsRelationshipRoutes as [$path, $method]) {
+        $app->get($path, [$qdsRelationshipController, $method])->add(new JwtAuthMiddleware(
+            $jwtService,
+            $app->getResponseFactory()
+        ));
+    }
+
+    $app->get('/api/v1/qds-assignment-view', [$qdsViewController, 'index'])->add(new JwtAuthMiddleware(
+        $jwtService,
+        $app->getResponseFactory()
+    ));
+
+    $teamToolRelationshipRoutes = [
+        ['/api/v1/team-tools/{team_id}/columns', 'teamToolColumns'],
+        ['/api/v1/team-tools/{team_id}/data', 'teamToolData'],
+        ['/api/v1/team-columns/{col_id}/team-tool', 'columnTeamTool'],
+        ['/api/v1/team-columns/{col_id}/data', 'columnData'],
+        ['/api/v1/team-data/{data_id}/team-tool', 'dataTeamTool'],
+        ['/api/v1/team-data/{data_id}/column', 'dataColumn'],
+    ];
+    foreach ($teamToolRelationshipRoutes as [$path, $method]) {
+        $app->get($path, [$teamToolRelationshipController, $method])->add(new JwtAuthMiddleware(
+            $jwtService,
+            $app->getResponseFactory()
+        ));
+    }
+
+    $toolRelationshipRoutes = [
+        ['/api/v1/employees/{gy_emp_code}/tool-data', 'employeeData'],
+        ['/api/v1/tools/{tool_id}/details', 'toolDetails'],
+        ['/api/v1/tool-details/{toold_id}/tool', 'detailTool'],
+        ['/api/v1/tool-details/{toold_id}/data', 'detailData'],
+        ['/api/v1/tool-data/{td_id}/tool-detail', 'dataDetail'],
+        ['/api/v1/tool-data/{td_id}/employee', 'dataEmployee'],
+    ];
+    foreach ($toolRelationshipRoutes as [$path, $method]) {
+        $app->get($path, [$toolRelationshipController, $method])->add(new JwtAuthMiddleware(
+            $jwtService,
+            $app->getResponseFactory()
+        ));
+    }
 
     foreach ([
         ['/api/v1/employee-dtr', 'employeeDtr'],

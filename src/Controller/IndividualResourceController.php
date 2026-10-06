@@ -226,6 +226,88 @@ final class IndividualResourceController
         return $this->findByPositiveId($response, $arguments['gy_hol_id'] ?? null, 'findHolidayById');
     }
 
+    /** @param array<string, string> $arguments */
+    public function qdsAssignGroup(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['qag_id'] ?? null, 'findQdsAssignGroupById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function qdsQueryKey(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['qdsqk_id'] ?? null, 'findQdsQueryKeyById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function teamTool(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['team_id'] ?? null, 'findTeamToolById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function teamColumn(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['col_id'] ?? null, 'findTeamColumnById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function teamData(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['data_id'] ?? null, 'findTeamDataById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function tool(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['tool_id'] ?? null, 'findToolById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function toolDetail(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['toold_id'] ?? null, 'findToolDetailById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function toolData(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['td_id'] ?? null, 'findToolDataById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function request(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['gy_req_id'] ?? null, 'findRequestById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function temporarySupervisor(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId(
+            $response,
+            $arguments['temp_sup_id'] ?? null,
+            'findTemporarySupervisorById'
+        );
+    }
+
+    /** @param array<string, string> $arguments */
+    public function dobRegistration(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['dob_id'] ?? null, 'findDobRegistrationById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function whitelistEntry(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['id'] ?? null, 'findWhitelistEntryById');
+    }
+
+    /** @param array<string, string> $arguments */
+    public function reason(ServerRequestInterface $request, ResponseInterface $response, array $arguments): ResponseInterface
+    {
+        return $this->findByPositiveId($response, $arguments['gy_reason_id'] ?? null, 'findReasonById');
+    }
+
     private function findByPositiveId(
         ResponseInterface $response,
         mixed $rawIdentifier,
