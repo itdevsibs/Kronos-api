@@ -15,6 +15,7 @@ use Sibs\KronosApi\Controller\BatchTableController;
 use Sibs\KronosApi\Controller\ConfirmationController;
 use Sibs\KronosApi\Controller\ApiClientController;
 use Sibs\KronosApi\Controller\AuthController;
+use Sibs\KronosApi\Controller\UserLoginController;
 use Sibs\KronosApi\Controller\CronSettingController;
 use Sibs\KronosApi\Controller\DepartmentController;
 use Sibs\KronosApi\Controller\DobRecordController;
@@ -78,6 +79,7 @@ use Sibs\KronosApi\Repository\WorkforceViewRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
 use Sibs\KronosApi\Service\JwtService;
+use Sibs\KronosApi\Service\UserLoginService;
 use Slim\Factory\AppFactory;
 use Slim\Psr7\Factory\ResponseFactory;
 use Slim\Psr7\Factory\ServerRequestFactory;
@@ -3800,6 +3802,15 @@ test('individual resource repository uses one exact explicit prepared query per 
             PDO::PARAM_STR,
         ],
         [
+            'findUserLoginCredentialsByEmployeeCode',
+            'test1',
+            'SELECT gy_user_id, gy_user_code, ghl_contact_id, qds_contact_id, gy_full_name, gy_username, '
+                . 'gy_user_type, gy_user_function, gy_head_code, gy_script_code, gy_user_status '
+                . 'FROM gy_user WHERE TRIM(gy_user_code) = TRIM(:employee_code) LIMIT 1',
+            ':employee_code',
+            PDO::PARAM_STR,
+        ],
+        [
             'findScheduleById',
             21,
             'SELECT gy_sched_id, gy_emp_id, gy_sched_day, gy_sched_mode, gy_sched_login, '
@@ -3875,6 +3886,7 @@ test('individual resource controller returns one compact resource and normalizes
         ['account', ['gy_acc_id' => '12'], ':account_id', 12],
         ['department', ['id_department' => '5'], ':department_id', 5],
         ['user', ['gy_emp_code' => '  test1  '], ':employee_code', 'test1'],
+        ['userLoginCredentials', ['gy_emp_code' => '  test1  '], ':employee_code', 'test1'],
         ['schedule', ['gy_sched_id' => '21'], ':schedule_id', 21],
         ['scheduleEscalation', ['gy_sched_esc_id' => '22'], ':schedule_escalation_id', 22],
         ['scheduleRdRequest', ['gy_rd_id' => '23'], ':schedule_rd_request_id', 23],
@@ -3909,6 +3921,7 @@ test('individual resource controller rejects invalid identifiers before creating
         ['account', ['gy_acc_id' => 'not-an-id']],
         ['department', ['id_department' => '-1']],
         ['user', ['gy_emp_code' => '']],
+        ['userLoginCredentials', ['gy_emp_code' => '123456789012']],
         ['schedule', ['gy_sched_id' => '0']],
         ['scheduleEscalation', ['gy_sched_esc_id' => 'bad']],
         ['scheduleRdRequest', ['gy_rd_id' => '-2']],
@@ -4003,6 +4016,7 @@ test('all individual resource routes require JWT and dispatch one lookup each', 
         ['/api/v1/accounts/12', 'FROM gy_accounts'],
         ['/api/v1/departments/5', 'FROM gy_department'],
         ['/api/v1/users/test1', 'FROM gy_user'],
+        ['/api/v1/users/test1/login-creds', 'qds_contact_id'],
         ['/api/v1/schedule/21', 'FROM gy_schedule'],
         ['/api/v1/schedule-escalations/22', 'FROM gy_schedule_escalate'],
         ['/api/v1/schedule-rd-requests/23', 'FROM gy_schedule_rd_request'],
@@ -4025,7 +4039,7 @@ test('all individual resource routes require JWT and dispatch one lookup each', 
         assertSameValue(200, $response->getStatusCode(), "Authorized {$path} request failed.");
         assertTrue(str_contains((string) ($recordingPdos[$index]->query ?? ''), $queryFragment), "{$path} dispatched to the wrong lookup.");
     }
-    assertSameValue(9, $repositoryCalls, 'Individual routes did not create exactly one repository each.');
+    assertSameValue(10, $repositoryCalls, 'Individual routes did not create exactly one repository each.');
 });
 
 test('employee schedule repository runs one count and one explicit paginated query', function (): void {
@@ -4034,20 +4048,20 @@ test('employee schedule repository runs one count and one explicit paginated que
     $pdo->fetchAllResults[1] = [['gy_sched_id' => 21, 'gy_emp_id' => 7]];
     $repository = new EmployeeScheduleRepository($pdo);
 
-    $result = $repository->findPage(7, 2, 15, 'night', '2026-09-01', '2026-09-30');
+    $result = $repository->findPage('test1', 2, 15, 'night', '2026-09-01', '2026-09-30');
 
     assertSameValue(2, count($pdo->queries), 'Employee schedules must execute exactly two queries.');
     foreach ($pdo->queries as $query) {
-        assertTrue(str_contains($query, 'FROM gy_schedule WHERE gy_emp_id = :employee_id'), 'Employee schedule filter is missing.');
-        assertTrue(str_contains($query, 'DATE(gy_sched_day) >= :date_from'), 'Start-date filter is missing.');
-        assertTrue(str_contains($query, 'DATE(gy_sched_day) <= :date_to'), 'End-date filter is missing.');
-        assertTrue(str_contains($query, "DATE_FORMAT(gy_sched_day, '%M %e, %Y') LIKE :search_1"), 'Formatted date search is missing.');
+        assertTrue(str_contains($query, 'FROM gy_schedule s INNER JOIN gy_employee e ON s.gy_emp_id = e.gy_emp_id WHERE TRIM(e.gy_emp_code) = :employee_code'), 'Employee schedule code lookup is missing.');
+        assertTrue(str_contains($query, 'DATE(s.gy_sched_day) >= :date_from'), 'Start-date filter is missing.');
+        assertTrue(str_contains($query, 'DATE(s.gy_sched_day) <= :date_to'), 'End-date filter is missing.');
+        assertTrue(str_contains($query, "DATE_FORMAT(s.gy_sched_day, '%M %e, %Y') LIKE :search_1"), 'Formatted date search is missing.');
         assertTrue(!str_contains(strtoupper($query), 'SELECT *'), 'Employee schedules used SELECT *.');
     }
     assertTrue(str_starts_with($pdo->queries[0], 'SELECT COUNT(*) AS total '), 'Employee schedule count query is incorrect.');
-    assertTrue(str_starts_with($pdo->queries[1], 'SELECT gy_sched_id, gy_emp_id, gy_sched_day'), 'Employee schedule projection is not explicit.');
-    assertTrue(str_contains($pdo->queries[1], 'ORDER BY gy_sched_day DESC, gy_sched_id DESC LIMIT :limit OFFSET :offset'), 'Employee schedule ordering or pagination is incorrect.');
-    assertSameValue(['value' => 7, 'type' => PDO::PARAM_INT], $pdo->bindings[0][':employee_id'] ?? null, 'Employee ID was not bound safely.');
+    assertTrue(str_starts_with($pdo->queries[1], 'SELECT s.gy_sched_id, s.gy_emp_id, s.gy_sched_day'), 'Employee schedule projection is not explicit.');
+    assertTrue(str_contains($pdo->queries[1], 'ORDER BY s.gy_sched_day DESC, s.gy_sched_id DESC LIMIT :limit OFFSET :offset'), 'Employee schedule ordering or pagination is incorrect.');
+    assertSameValue(['value' => 'test1', 'type' => PDO::PARAM_STR], $pdo->bindings[0][':employee_code'] ?? null, 'Employee code was not bound safely.');
     assertSameValue(['value' => '%night%', 'type' => PDO::PARAM_STR], $pdo->bindings[1][':search_0'] ?? null, 'Search was not bound safely.');
     assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':limit'] ?? null, 'Limit was not bound safely.');
     assertSameValue(['value' => 15, 'type' => PDO::PARAM_INT], $pdo->bindings[1][':offset'] ?? null, 'Offset was not calculated correctly.');
@@ -4062,7 +4076,7 @@ test('employee schedule controller validates filters and returns the required pa
         static fn (): EmployeeScheduleRepository => new EmployeeScheduleRepository($pdo)
     );
     $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-schedules')
-        ->withQueryParams(['gy_emp_id' => '7']);
+        ->withQueryParams(['gy_emp_code' => ' test1 ']);
     $response = $controller->index($request, (new ResponseFactory())->createResponse());
 
     assertSameValue(200, $response->getStatusCode(), 'Employee schedule view returned the wrong status.');
@@ -4083,10 +4097,11 @@ test('employee schedule controller validates filters and returns the required pa
 
     foreach ([
         [],
-        ['gy_emp_id' => '0'],
-        ['gy_emp_id' => 'bad'],
-        ['gy_emp_id' => '7', 'date_from' => '2026-02-30'],
-        ['gy_emp_id' => '7', 'date_to' => '09/30/2026'],
+        ['gy_emp_code' => ''],
+        ['gy_emp_code' => ['bad']],
+        ['gy_emp_code' => '123456789012'],
+        ['gy_emp_code' => 'test1', 'date_from' => '2026-02-30'],
+        ['gy_emp_code' => 'test1', 'date_to' => '09/30/2026'],
     ] as $query) {
         $repositoryCreated = false;
         $invalidController = new EmployeeScheduleController(
@@ -4125,7 +4140,7 @@ test('employee schedules route requires JWT before running its two queries', fun
         employeeScheduleRepositoryFactory: $factory
     );
     $app->addRoutingMiddleware();
-    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-schedules?gy_emp_id=7');
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/employee-schedules?gy_emp_code=test1');
 
     assertSameValue(401, $app->handle($request)->getStatusCode(), 'Employee schedules route is not JWT protected.');
     assertSameValue(0, $repositoryCalls, 'Employee schedule repository ran before authorization.');
@@ -5765,4 +5780,92 @@ test('Batch 10 missing standalone resources return sanitized 404 responses', fun
         assertSameValue(404, $response->getStatusCode(), "{$method} did not return 404 for a missing record.");
         assertSameValue(['success' => false, 'message' => 'Resource not found.'], responseJson($response), "{$method} exposed unexpected details.");
     }
+});
+
+test('HRIS login verifies the legacy encrypted password and returns no stored credential', function (): void {
+    $pdo = new RecordingPdo();
+    $pdo->fetchResult = [
+        'gy_user_id' => 2539,
+        'gy_user_code' => '6496',
+        'gy_username' => 'person@example.test',
+        'gy_user_status' => 0,
+        'gy_password' => 'L0djQzNOOFREdDlGaE9XQWM0L2NYNFlIZE5tY3lobUUzMEZQK05ObG5jbz0=',
+        'gy_emp_id' => 547,
+        'accountId' => 4,
+        'account' => 'Example',
+        'department' => 'Operations',
+    ];
+    $service = new UserLoginService($pdo, [
+        'ENCRYPT_METHOD' => 'aes-256-cbc',
+        'ENCRYPT_SECRET_KEY' => 'unit-test-key',
+        'ENCRYPT_SECRET_IV' => 'unit-test-iv',
+    ]);
+    $user = $service->authenticate(['sibsId' => '6496', 'password' => 'example-password']);
+
+    assertSameValue(1, $pdo->prepareCalls, 'HRIS login must run one prepared query.');
+    assertTrue(str_contains((string) $pdo->query, 'FROM gy_user u LEFT JOIN gy_employee e'), 'HRIS login omitted its employee join.');
+    assertTrue(str_contains((string) $pdo->query, 'u.gy_user_status = 0'), 'HRIS login accepted inactive users.');
+    assertTrue(!str_contains(strtoupper((string) $pdo->query), 'SELECT *'), 'HRIS login used SELECT *.');
+    assertSameValue(['6496', '6496'], array_values($pdo->parameters ?? []), 'HRIS login did not bind both code and username.');
+    assertSameValue(547, $user['gy_emp_id'] ?? null, 'HRIS login lost its employee profile.');
+    assertTrue(!array_key_exists('gy_password', $user), 'HRIS login returned the stored credential.');
+});
+
+test('HRIS login rejects incorrect credentials without returning the stored password', function (): void {
+    $pdo = new RecordingPdo();
+    $pdo->fetchResult = [
+        'gy_user_id' => 2539,
+        'gy_user_status' => 0,
+        'gy_password' => 'L0djQzNOOFREdDlGaE9XQWM0L2NYNFlIZE5tY3lobUUzMEZQK05ObG5jbz0=',
+    ];
+    $controller = new UserLoginController(static fn (): UserLoginService => new UserLoginService($pdo, [
+        'ENCRYPT_METHOD' => 'aes-256-cbc',
+        'ENCRYPT_SECRET_KEY' => 'unit-test-key',
+        'ENCRYPT_SECRET_IV' => 'unit-test-iv',
+    ]));
+    $request = (new ServerRequestFactory())->createServerRequest('POST', '/api/v1/auth/user-login')
+        ->withParsedBody(['sibsId' => '6496', 'password' => 'wrong-password']);
+    $response = $controller->login($request, (new ResponseFactory())->createResponse());
+    assertSameValue(401, $response->getStatusCode(), 'HRIS login accepted the wrong password.');
+    assertSameValue(['success' => false, 'message' => 'Invalid user credentials.'], responseJson($response), 'HRIS login leaked credential details.');
+    assertTrue(!str_contains((string) $response->getBody(), 'gy_password'), 'HRIS login leaked the password field.');
+});
+
+test('HRIS login route requires an API Bearer token', function (): void {
+    $keys = testRsaKeys();
+    $jwtService = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $calls = 0;
+    $factory = static function () use (&$calls): UserLoginService {
+        $calls++;
+        $pdo = new RecordingPdo();
+        $pdo->fetchResult = [
+            'gy_user_id' => 2539,
+            'gy_user_code' => '6496',
+            'gy_user_status' => 0,
+            'gy_password' => 'L0djQzNOOFREdDlGaE9XQWM0L2NYNFlIZE5tY3lobUUzMEZQK05ObG5jbz0=',
+        ];
+        return new UserLoginService($pdo, [
+            'ENCRYPT_METHOD' => 'aes-256-cbc',
+            'ENCRYPT_SECRET_KEY' => 'unit-test-key',
+            'ENCRYPT_SECRET_IV' => 'unit-test-iv',
+        ]);
+    };
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        serviceFactory: static fn (): ApiClientService => new ApiClientService(new RecordingPdo()),
+        apiTokenServiceFactory: static fn (): ApiTokenService => new ApiTokenService(new RecordingPdo()),
+        jwtServiceFactory: static fn (): JwtService => $jwtService,
+        userLoginServiceFactory: $factory
+    );
+    $app->addRoutingMiddleware();
+    $request = (new ServerRequestFactory())->createServerRequest('POST', '/api/v1/auth/user-login')
+        ->withParsedBody(['sibsId' => '6496', 'password' => 'example-password']);
+    assertSameValue(401, $app->handle($request)->getStatusCode(), 'HRIS login allowed a request without an API token.');
+    assertSameValue(0, $calls, 'HRIS login queried before API authentication.');
+    $response = $app->handle($request->withHeader('Authorization', 'Bearer ' . $jwtService->issue(['id' => 7, 'client_name' => 'SiBS HRIS'])));
+    assertSameValue(200, $response->getStatusCode(), 'HRIS login rejected a valid API token and password.');
+    assertSameValue(1, $calls, 'HRIS login did not query exactly once.');
+    assertTrue(!str_contains((string) $response->getBody(), 'gy_password'), 'HRIS login exposed the stored credential.');
 });

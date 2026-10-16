@@ -34,6 +34,7 @@ use Sibs\KronosApi\Controller\QdsViewController;
 use Sibs\KronosApi\Controller\TeamToolRelationshipController;
 use Sibs\KronosApi\Controller\ToolRelationshipController;
 use Sibs\KronosApi\Controller\UserController;
+use Sibs\KronosApi\Controller\UserLoginController;
 use Sibs\KronosApi\Controller\WorkforceRelationshipController;
 use Sibs\KronosApi\Controller\WorkforceViewController;
 use Sibs\KronosApi\Database\Database;
@@ -72,6 +73,7 @@ use Sibs\KronosApi\Repository\WorkforceViewRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
 use Sibs\KronosApi\Service\JwtService;
+use Sibs\KronosApi\Service\UserLoginService;
 use Slim\App;
 
 return function (
@@ -107,7 +109,8 @@ return function (
     ?\Closure $qdsRelationshipRepositoryFactory = null,
     ?\Closure $qdsViewRepositoryFactory = null,
     ?\Closure $teamToolRelationshipRepositoryFactory = null,
-    ?\Closure $toolRelationshipRepositoryFactory = null
+    ?\Closure $toolRelationshipRepositoryFactory = null,
+    ?\Closure $userLoginServiceFactory = null
 ): void {
 
     $serviceFactory ??= static fn (): ApiClientService => new ApiClientService(
@@ -146,6 +149,22 @@ return function (
         $jwtServiceFactory,
         $accessTtl
     );
+
+    $userLoginServiceFactory ??= static fn (): UserLoginService => new UserLoginService(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'),
+            'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'),
+            'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ]),
+        [
+            'ENCRYPT_METHOD' => Environment::get('ENCRYPT_METHOD'),
+            'ENCRYPT_SECRET_KEY' => Environment::get('ENCRYPT_SECRET_KEY'),
+            'ENCRYPT_SECRET_IV' => Environment::get('ENCRYPT_SECRET_IV'),
+        ]
+    );
+    $userLoginController = new UserLoginController($userLoginServiceFactory);
 
     $employeeRepositoryFactory ??= static fn (): EmployeeRepository => new EmployeeRepository(
         Database::connect([
@@ -466,6 +485,9 @@ return function (
 
     $app->post('/api/v1/auth/token', [$authController, 'issue']);
 
+    $app->post('/api/v1/auth/user-login', [$userLoginController, 'login'])
+        ->add(new JwtAuthMiddleware($jwtService, $app->getResponseFactory()));
+
     $app->get('/api/v1/protected-test', function (
         Request $request,
         Response $response
@@ -534,6 +556,7 @@ return function (
         ['/api/v1/accounts/{gy_acc_id}', 'account'],
         ['/api/v1/departments/{id_department}', 'department'],
         ['/api/v1/users/{gy_emp_code}', 'user'],
+        ['/api/v1/users/{gy_emp_code}/login-creds', 'userLoginCredentials'],
         ['/api/v1/schedule/{gy_sched_id}', 'schedule'],
         ['/api/v1/schedule-escalations/{gy_sched_esc_id}', 'scheduleEscalation'],
         ['/api/v1/schedule-rd-requests/{gy_rd_id}', 'scheduleRdRequest'],

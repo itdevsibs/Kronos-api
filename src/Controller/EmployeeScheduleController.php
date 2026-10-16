@@ -37,7 +37,7 @@ final class EmployeeScheduleController
     {
         try {
             $query = $request->getQueryParams();
-            $employeeId = $this->requiredPositiveId($query['gy_emp_id'] ?? null);
+            $employeeCode = $this->requiredEmployeeCode($query['gy_emp_code'] ?? null);
             $page = $this->positiveIntegerOrDefault($query['page'] ?? null, self::DEFAULT_PAGE);
             $limit = min(
                 self::MAX_LIMIT,
@@ -51,7 +51,7 @@ final class EmployeeScheduleController
             $dateTo = $this->optionalDate($query['date_to'] ?? null);
 
             $result = ($this->repositoryFactory)()->findPage(
-                $employeeId,
+                $employeeCode,
                 $page,
                 $limit,
                 $search,
@@ -94,17 +94,17 @@ final class EmployeeScheduleController
         }
     }
 
-    private function requiredPositiveId(mixed $value): int
+    private function requiredEmployeeCode(mixed $value): string
     {
-        if (!is_int($value) && !is_string($value)) {
-            throw new InvalidArgumentException('Invalid employee ID.');
+        if (!is_string($value)) {
+            throw new InvalidArgumentException('Invalid employee code.');
         }
-        $id = filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
-        if ($id === false) {
-            throw new InvalidArgumentException('Invalid employee ID.');
+        $code = trim($value);
+        if ($code === '' || mb_strlen($code) > 11) {
+            throw new InvalidArgumentException('Invalid employee code.');
         }
 
-        return $id;
+        return $code;
     }
 
     private function positiveIntegerOrDefault(mixed $value, int $default): int

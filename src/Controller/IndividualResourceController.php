@@ -82,6 +82,19 @@ final class IndividualResourceController
     }
 
     /** @param array<string, string> $arguments */
+    public function userLoginCredentials(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        array $arguments
+    ): ResponseInterface {
+        $employeeCode = $this->employeeCode($arguments['gy_emp_code'] ?? null);
+
+        return $employeeCode === null
+            ? $this->invalidIdentifier($response)
+            : $this->find($response, 'findUserLoginCredentialsByEmployeeCode', $employeeCode);
+    }
+
+    /** @param array<string, string> $arguments */
     public function schedule(
         ServerRequestInterface $request,
         ResponseInterface $response,
