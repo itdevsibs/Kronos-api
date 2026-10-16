@@ -29,6 +29,11 @@ final class IndividualResourceRepository
         . 'gy_user_type, gy_user_function, gy_head_code, gy_script_code, gy_user_status '
         . 'FROM gy_user WHERE TRIM(gy_user_code) = TRIM(:employee_code) LIMIT 1';
 
+    private const USER_LOGIN_CREDENTIALS_QUERY = 'SELECT gy_user_id, gy_user_code, ghl_contact_id, '
+        . 'qds_contact_id, gy_full_name, gy_username, gy_user_type, gy_user_function, gy_head_code, '
+        . 'gy_script_code, gy_user_status FROM gy_user '
+        . 'WHERE TRIM(gy_user_code) = TRIM(:employee_code) LIMIT 1';
+
     private const SCHEDULE_QUERY = 'SELECT gy_sched_id, gy_emp_id, gy_sched_day, gy_sched_mode, gy_sched_login, '
         . 'gy_sched_breakout, gy_sched_breakin, gy_sched_logout, gy_sched_reg, gy_sched_by '
         . 'FROM gy_schedule WHERE gy_sched_id = :schedule_id LIMIT 1';
@@ -180,6 +185,17 @@ final class IndividualResourceRepository
     public function findUserByEmployeeCode(string $employeeCode): ?array
     {
         return $this->findOne(self::USER_QUERY, ':employee_code', $employeeCode, PDO::PARAM_STR);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findUserLoginCredentialsByEmployeeCode(string $employeeCode): ?array
+    {
+        return $this->findOne(
+            self::USER_LOGIN_CREDENTIALS_QUERY,
+            ':employee_code',
+            $employeeCode,
+            PDO::PARAM_STR
+        );
     }
 
     /** @return array<string, mixed>|null */

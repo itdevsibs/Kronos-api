@@ -10,8 +10,8 @@ use RuntimeException;
 
 final class EmployeeScheduleRepository
 {
-    private const FIELDS = 'gy_sched_id, gy_emp_id, gy_sched_day, gy_sched_mode, gy_sched_login, '
-        . 'gy_sched_breakout, gy_sched_breakin, gy_sched_logout, gy_sched_reg, gy_sched_by';
+    private const FIELDS = 's.gy_sched_id, s.gy_emp_id, s.gy_sched_day, s.gy_sched_mode, s.gy_sched_login, '
+        . 's.gy_sched_breakout, s.gy_sched_breakin, s.gy_sched_logout, s.gy_sched_reg, s.gy_sched_by';
 
     public function __construct(private readonly PDO $pdo)
     {
@@ -19,27 +19,27 @@ final class EmployeeScheduleRepository
 
     /** @return array{data: list<array<string, mixed>>, total: int} */
     public function findPage(
-        int $employeeId,
+        string $employeeCode,
         int $page,
         int $limit,
         ?string $search,
         ?string $dateFrom,
         ?string $dateTo
     ): array {
-        $where = ['gy_emp_id = :employee_id'];
-        $bindings = [':employee_id' => [$employeeId, PDO::PARAM_INT]];
+        $where = ['TRIM(e.gy_emp_code) = :employee_code'];
+        $bindings = [':employee_code' => [$employeeCode, PDO::PARAM_STR]];
 
         if ($search !== null && $search !== '') {
             $searchFields = [
-                "DATE_FORMAT(gy_sched_day, '%Y-%m-%d')",
-                "DATE_FORMAT(gy_sched_day, '%M %e, %Y')",
-                'gy_sched_mode',
-                'gy_sched_login',
-                'gy_sched_breakout',
-                'gy_sched_breakin',
-                'gy_sched_logout',
-                "DATE_FORMAT(gy_sched_reg, '%Y-%m-%d')",
-                "DATE_FORMAT(gy_sched_reg, '%M %e, %Y')",
+                "DATE_FORMAT(s.gy_sched_day, '%Y-%m-%d')",
+                "DATE_FORMAT(s.gy_sched_day, '%M %e, %Y')",
+                's.gy_sched_mode',
+                's.gy_sched_login',
+                's.gy_sched_breakout',
+                's.gy_sched_breakin',
+                's.gy_sched_logout',
+                "DATE_FORMAT(s.gy_sched_reg, '%Y-%m-%d')",
+                "DATE_FORMAT(s.gy_sched_reg, '%M %e, %Y')",
             ];
             $searchConditions = [];
             foreach ($searchFields as $index => $field) {
@@ -51,15 +51,16 @@ final class EmployeeScheduleRepository
         }
 
         if ($dateFrom !== null) {
-            $where[] = 'DATE(gy_sched_day) >= :date_from';
+            $where[] = 'DATE(s.gy_sched_day) >= :date_from';
             $bindings[':date_from'] = [$dateFrom, PDO::PARAM_STR];
         }
         if ($dateTo !== null) {
-            $where[] = 'DATE(gy_sched_day) <= :date_to';
+            $where[] = 'DATE(s.gy_sched_day) <= :date_to';
             $bindings[':date_to'] = [$dateTo, PDO::PARAM_STR];
         }
 
-        $whereSql = 'FROM gy_schedule WHERE ' . implode(' AND ', $where);
+        $whereSql = 'FROM gy_schedule s INNER JOIN gy_employee e ON s.gy_emp_id = e.gy_emp_id WHERE '
+            . implode(' AND ', $where);
         $countStatement = $this->prepare('SELECT COUNT(*) AS total ' . $whereSql);
         $this->bindAll($countStatement, $bindings);
         $countStatement->execute();
@@ -71,7 +72,7 @@ final class EmployeeScheduleRepository
         $dataBindings[':offset'] = [($page - 1) * $limit, PDO::PARAM_INT];
         $dataStatement = $this->prepare(
             'SELECT ' . self::FIELDS . ' ' . $whereSql
-                . ' ORDER BY gy_sched_day DESC, gy_sched_id DESC LIMIT :limit OFFSET :offset'
+                . ' ORDER BY s.gy_sched_day DESC, s.gy_sched_id DESC LIMIT :limit OFFSET :offset'
         );
         $this->bindAll($dataStatement, $dataBindings);
         $dataStatement->execute();
