@@ -37,6 +37,7 @@ use Sibs\KronosApi\Controller\UserController;
 use Sibs\KronosApi\Controller\UserLoginController;
 use Sibs\KronosApi\Controller\WorkforceRelationshipController;
 use Sibs\KronosApi\Controller\WorkforceViewController;
+use Sibs\KronosApi\Controller\RampsMetricsController;
 use Sibs\KronosApi\Database\Database;
 use Sibs\KronosApi\Environment;
 use Sibs\KronosApi\Middleware\AdminSetupKeyMiddleware;
@@ -70,6 +71,7 @@ use Sibs\KronosApi\Repository\ToolRelationshipRepository;
 use Sibs\KronosApi\Repository\UserRepository;
 use Sibs\KronosApi\Repository\WorkforceRelationshipRepository;
 use Sibs\KronosApi\Repository\WorkforceViewRepository;
+use Sibs\KronosApi\Repository\RampsMetricsRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
 use Sibs\KronosApi\Service\JwtService;
@@ -110,7 +112,8 @@ return function (
     ?\Closure $qdsViewRepositoryFactory = null,
     ?\Closure $teamToolRelationshipRepositoryFactory = null,
     ?\Closure $toolRelationshipRepositoryFactory = null,
-    ?\Closure $userLoginServiceFactory = null
+    ?\Closure $userLoginServiceFactory = null,
+    ?\Closure $rampsMetricsRepositoryFactory = null
 ): void {
 
     $serviceFactory ??= static fn (): ApiClientService => new ApiClientService(
@@ -360,6 +363,17 @@ return function (
         ])
     );
     $workforceViewController = new WorkforceViewController($workforceViewRepositoryFactory);
+
+    $rampsMetricsRepositoryFactory ??= static fn (): RampsMetricsRepository => new RampsMetricsRepository(
+        Database::connect([
+            'DB1_HOST' => Environment::get('DB1_HOST'),
+            'DB1_PORT' => Environment::get('DB1_PORT'),
+            'DB1_NAME' => Environment::get('DB1_NAME'),
+            'DB1_USER' => Environment::get('DB1_USER'),
+            'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+        ])
+    );
+    $rampsMetricsController = new RampsMetricsController($rampsMetricsRepositoryFactory);
 
     $leaveRelationshipRepositoryFactory ??= static fn (): LeaveRelationshipRepository => new LeaveRelationshipRepository(
         Database::connect([
@@ -814,6 +828,16 @@ return function (
         ['/api/v1/escalation-queue', 'escalationQueue'],
     ] as [$path, $method]) {
         $app->get($path, [$workforceViewController, $method])->add(new JwtAuthMiddleware(
+            $jwtService,
+            $app->getResponseFactory()
+        ));
+    }
+
+    foreach ([
+        ['/api/v1/workforce-weekly-account-metrics', 'weeklyAccountMetrics'],
+        ['/api/v1/workforce-report-metadata', 'reportMetadata'],
+    ] as [$path, $method]) {
+        $app->get($path, [$rampsMetricsController, $method])->add(new JwtAuthMiddleware(
             $jwtService,
             $app->getResponseFactory()
         ));
