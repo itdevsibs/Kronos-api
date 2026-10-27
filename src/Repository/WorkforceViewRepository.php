@@ -57,18 +57,58 @@ final class WorkforceViewRepository
     {
     }
 
-    public function findEmployeeAttendancePage(int $page, int $limit, array $filters): array
-    {
-        [$where, $bindings] = $this->trackerFilters($filters, true);
-        $from = 'FROM gy_tracker t INNER JOIN gy_employee e '
-            . 'ON TRIM(t.gy_emp_code) = TRIM(e.gy_emp_code) '
-            . 'INNER JOIN gy_accounts a ON t.gy_account_id = a.gy_acc_id '
-            . 'INNER JOIN gy_department d ON a.gy_dept_id = d.id_department ';
-        $select = self::TRACKER_FIELDS . ', ' . self::EMPLOYEE_FIELDS . ', '
-            . self::ACCOUNT_FIELDS . ', ' . self::DEPARTMENT_FIELDS;
+    
+    public function findEmployeeAttendancePage(
+        int $page,
+        int $limit,
+        array $filters
+    ): array {
+        [$where, $bindings] = $this->trackerFilters(
+            $filters,
+            true
+        );
 
-        return $this->page($select, $from, $where, $bindings, 't.gy_tracker_date DESC, t.gy_tracker_id DESC', $page, $limit);
+        $from = 'FROM gy_tracker t '
+            . 'INNER JOIN gy_employee e '
+            . 'ON TRIM(t.gy_emp_code) = TRIM(e.gy_emp_code) '
+            . 'INNER JOIN gy_accounts a '
+            . 'ON t.gy_account_id = a.gy_acc_id '
+            . 'INNER JOIN gy_department d '
+            . 'ON a.gy_dept_id = d.id_department '
+            . 'LEFT JOIN gy_escalate esc '
+            . 'ON esc.gy_esc_id = ('
+            . ' SELECT x.gy_esc_id '
+            . ' FROM gy_escalate x '
+            . ' WHERE x.gy_tracker_id = t.gy_tracker_id '
+            . ' AND x.gy_esc_type = 7 '
+            . ' ORDER BY x.gy_esc_date DESC, x.gy_esc_id DESC '
+            . ' LIMIT 1'
+            . ') ';
+
+        $select = self::TRACKER_FIELDS . ', '
+            . self::EMPLOYEE_FIELDS . ', '
+            . self::ACCOUNT_FIELDS . ', '
+            . self::DEPARTMENT_FIELDS . ', '
+            . 'esc.gy_esc_id AS adjustment_id, '
+            . 'esc.gy_esc_status AS adjustment_status, '
+            . 'esc.gy_esc_date AS adjustment_date, '
+            . 'CASE '
+            . 'WHEN esc.gy_esc_status = 0 '
+            . "THEN 'Escalating' "
+            . 'ELSE NULL '
+            . 'END AS attendance_status_override';
+
+        return $this->page(
+            $select,
+            $from,
+            $where,
+            $bindings,
+            't.gy_tracker_date DESC, t.gy_tracker_id DESC',
+            $page,
+            $limit
+        );
     }
+
 
     public function findEmployeeTrackerHistoryPage(int $page, int $limit, array $filters): array
     {
