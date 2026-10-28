@@ -365,6 +365,11 @@ return function (
     );
     $workforceViewController = new WorkforceViewController($workforceViewRepositoryFactory);
 
+    // Separate attendance-with-adjustments controller; preserve existing workforce routes.
+    $employeeAttendanceAdjustmentsController = new EmployeeAttendanceAdjustmentsController(
+        $workforceViewRepositoryFactory
+    );
+
     $rampsMetricsRepositoryFactory ??= static fn (): RampsMetricsRepository => new RampsMetricsRepository(
         Database::connect([
             'DB1_HOST' => Environment::get('DB1_HOST'),
@@ -833,6 +838,15 @@ return function (
             $app->getResponseFactory()
         ));
     }
+
+    // Separate GET endpoint for attendance tracker adjustment status.
+    $app->get(
+        '/api/v1/employee-attendance-with-adjustments',
+        [$employeeAttendanceAdjustmentsController, 'index']
+    )->add(new JwtAuthMiddleware(
+        $jwtService,
+        $app->getResponseFactory()
+    ));
 
     foreach ([
         ['/api/v1/workforce-weekly-account-metrics', 'weeklyAccountMetrics'],
