@@ -25,6 +25,7 @@ use Sibs\KronosApi\Controller\EmployeeDirectoryController;
 use Sibs\KronosApi\Controller\EmployeeRelationshipController;
 use Sibs\KronosApi\Controller\EmployeeScheduleController;
 use Sibs\KronosApi\Controller\IndividualResourceController;
+use Sibs\KronosApi\Controller\EmployeeAttendanceAdjustmentsController;
 use Sibs\KronosApi\Controller\HolidayRelationshipController;
 use Sibs\KronosApi\Controller\HolidayViewController;
 use Sibs\KronosApi\Controller\LeaveRelationshipController;
@@ -360,6 +361,13 @@ return function (
         ])
     );
     $workforceViewController = new WorkforceViewController($workforceViewRepositoryFactory);
+
+    
+    $employeeAttendanceAdjustmentsController =
+        new EmployeeAttendanceAdjustmentsController(
+            $workforceViewRepositoryFactory
+        );
+
 
     $leaveRelationshipRepositoryFactory ??= static fn (): LeaveRelationshipRepository => new LeaveRelationshipRepository(
         Database::connect([
@@ -818,6 +826,16 @@ return function (
             $app->getResponseFactory()
         ));
     }
+
+    
+    $app->get(
+        '/api/v1/employee-attendance-with-adjustments',
+        [$employeeAttendanceAdjustmentsController, 'index']
+    )->add(new JwtAuthMiddleware(
+        $jwtService,
+        $app->getResponseFactory()
+    ));
+
 
     $app->get(
         '/api/v1/assign-timesheet',
