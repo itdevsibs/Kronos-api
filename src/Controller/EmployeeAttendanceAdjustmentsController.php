@@ -93,31 +93,85 @@ final class EmployeeAttendanceAdjustmentsController
                 );
 
             
+            // Kronos Daily Logs stays Pending for the first three calendar
+            // dates, based on Philippine time. The fourth date may show the
+            // validated result. A pending type-7 escalation still has priority.
+            $philippineZone = new \DateTimeZone('Asia/Manila');
+            $today = new DateTimeImmutable('today', $philippineZone);
+
             foreach ($result['data'] as &$row) {
                 $requestStatus = strtolower(
                     trim((string) ($row['gy_tracker_request'] ?? ''))
                 );
-
-                $adjustmentStatus = $row['adjustment_status'] ?? null;
                 $adjustmentType = $row['adjustment_type'] ?? null;
+                $adjustmentStatus = $row['adjustment_status'] ?? null;
 
-                // Pending schedule adjustment takes highest priority.
-                $isEscalating = $adjustmentType !== null
+                // Pending type-7 adjustment always wins, including when
+                // the original attendance tracker says "approve".
+                if (
+                    $adjustmentType !== null
                     && (int) $adjustmentType === 7
                     && $adjustmentStatus !== null
-                    && (int) $adjustmentStatus === 0;
-
-                if ($isEscalating) {
+                    && (int) $adjustmentStatus === 0
+                ) {
                     $row['attendance_status'] = 'Escalating';
-                } else {
-                    $row['attendance_status'] = match ($requestStatus) {
-                        'approve', 'approved' => 'Approved',
-                        'pending' => 'Pending',
-                        'reject', 'rejected',
-                        'deny', 'denied' => 'Rejected',
-                        default => 'Unknown',
-                    };
+                    $row['attendance_status_source'] = 'schedule_adjustment';
+                    continue;
                 }
+
+                // Do not label today's, yesterday's, or the previous
+                // calendar day's attendance as Approved merely because
+                // its tracker is completed or an automatic decision exists.
+                // The actual Kronos Daily Logs display is Pending throughout
+                // this review window. We intentionally use midnight in PH
+                // rather than elapsed 24-hour periods.
+                $rawDate = (string) ($row['gy_tracker_date'] ?? '');
+                $trackerDayText = substr($rawDate, 0, 10);
+                $trackerDay = DateTimeImmutable::createFromFormat(
+                    '!Y-m-d',
+                    $trackerDayText,
+                    $philippineZone
+                );
+
+                if (
+                    $trackerDay instanceof DateTimeImmutable
+                    && $trackerDay->format('Y-m-d') === $trackerDayText
+                    && $trackerDay <= $today
+                    && $today < $trackerDay->modify('+3 days')
+                ) {
+                    $row['attendance_status'] = 'Pending';
+                    $row['attendance_status_source'] = 'kronos_three_day_review';
+                    continue;
+                }
+
+                $decision = match ($requestStatus) {
+                    'approve', 'approved' => 'Approved',
+                    'pending' => 'Pending',
+                    'escalating', 'escalated' => 'Escalating',
+                    'reject', 'rejected', 'deny', 'denied' => 'Rejected',
+                    default => null,
+                };
+
+                if ($decision !== null) {
+                    $row['attendance_status'] = $decision;
+                    $row['attendance_status_source'] = 'tracker_request';
+                    continue;
+                }
+
+                // With no explicit decision Kronos can leave the request
+                // blank. Preserve the existing HRIS display convention:
+                // 0 ongoing -> Pending; 1 complete -> Approved.
+                // This is a lifecycle-based fallback, not a separate
+                // confirmed approval event.
+                $trackerStatus = trim(
+                    (string) ($row['gy_tracker_status'] ?? '')
+                );
+                $row['attendance_status'] = match ($trackerStatus) {
+                    '0' => 'Pending',
+                    '1' => 'Approved',
+                    default => 'Unknown',
+                };
+                $row['attendance_status_source'] = 'tracker_lifecycle_fallback';
             }
 
             unset($row);
