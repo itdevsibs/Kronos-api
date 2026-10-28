@@ -25,6 +25,7 @@ use Sibs\KronosApi\Controller\EmployeeDirectoryController;
 use Sibs\KronosApi\Controller\EmployeeRelationshipController;
 use Sibs\KronosApi\Controller\EmployeeScheduleController;
 use Sibs\KronosApi\Controller\IndividualResourceController;
+use Sibs\KronosApi\Controller\EmployeeAttendanceAdjustmentsController;
 use Sibs\KronosApi\Controller\HolidayRelationshipController;
 use Sibs\KronosApi\Controller\HolidayViewController;
 use Sibs\KronosApi\Controller\LeaveRelationshipController;
