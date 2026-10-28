@@ -40,6 +40,7 @@ use Sibs\KronosApi\Controller\ToolRelationshipController;
 use Sibs\KronosApi\Controller\UserController;
 use Sibs\KronosApi\Controller\WorkforceRelationshipController;
 use Sibs\KronosApi\Controller\WorkforceViewController;
+use Sibs\KronosApi\Controller\RampsMetricsController;
 use Sibs\KronosApi\Config\BatchTableConfig;
 use Sibs\KronosApi\Database\Database;
 use Sibs\KronosApi\Environment;
@@ -77,6 +78,7 @@ use Sibs\KronosApi\Repository\TeamToolRelationshipRepository;
 use Sibs\KronosApi\Repository\ToolRelationshipRepository;
 use Sibs\KronosApi\Repository\WorkforceRelationshipRepository;
 use Sibs\KronosApi\Repository\WorkforceViewRepository;
+use Sibs\KronosApi\Repository\RampsMetricsRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
 use Sibs\KronosApi\Service\JwtService;
@@ -5869,4 +5871,118 @@ test('HRIS login route requires an API Bearer token', function (): void {
     assertSameValue(200, $response->getStatusCode(), 'HRIS login rejected a valid API token and password.');
     assertSameValue(1, $calls, 'HRIS login did not query exactly once.');
     assertTrue(!str_contains((string) $response->getBody(), 'gy_password'), 'HRIS login exposed the stored credential.');
+});
+
+test('RAMPS request validates calculation mode and dates before querying', static function (): void {
+    $called = false;
+    $controller = new RampsMetricsController(static function () use (&$called): RampsMetricsRepository {
+        $called = true;
+        return new RampsMetricsRepository(new RecordingPdo());
+    });
+    $factory = new ResponseFactory();
+    $requests = [
+        '/api/v1/workforce-weekly-account-metrics?date_from=2026-10-01&date_to=2026-10-07&calculation_mode=other',
+        '/api/v1/workforce-weekly-account-metrics?date_from=2026-02-30&date_to=2026-10-07',
+        '/api/v1/workforce-weekly-account-metrics?date_from=2026-10-07&date_to=2026-10-01',
+        '/api/v1/workforce-weekly-account-metrics?date_from=0001-01-01&date_to=0001-01-07',
+        '/api/v1/workforce-weekly-account-metrics?date_from=2020-01-01&date_to=2024-01-01',
+        '/api/v1/workforce-weekly-account-metrics?date_from=2026-10-01&date_to=2026-10-07&account_ids=4,bad',
+        '/api/v1/workforce-weekly-account-metrics?date_from=2026-10-01&date_to=2026-10-07&calculation_mode=single_account_fast',
+    ];
+    foreach ($requests as $uri) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $uri);
+        $response = $controller->weeklyAccountMetrics($request, $factory->createResponse());
+        assertSameValue(400, $response->getStatusCode(), 'Invalid RAMPS request was accepted.');
+    }
+    assertSameValue(false, $called, 'Invalid RAMPS request opened the database.');
+});
+
+test('RAMPS metadata calculates the earliest valid agent hire date in SQL', static function (): void {
+    $pdo = new RecordingPdo();
+    $pdo->fetchResult = ['first_agent_hire_date' => '2025-01-07'];
+    $repository = new RampsMetricsRepository($pdo);
+    assertSameValue('2025-01-07', $repository->firstAgentHireDate(), 'Unexpected first agent hire date.');
+    assertSameValue(1, $pdo->prepareCalls, 'Metadata executed more than one query.');
+    assertTrue(str_contains((string) $pdo->query, 'MIN('), 'Metadata did not aggregate in SQL.');
+    assertTrue(str_contains((string) $pdo->query, 'gy_emp_type = 1'), 'Metadata included non-agents.');
+});
+
+test('RAMPS metrics return bounded weeks with scope cutoff and zero-filled accounts', static function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchAllResults = [
+        [['account_id' => 7], ['account_id' => 8]],
+        [['week_index' => 0, 'account_id' => 7, 'effective_week_end' => '2026-10-02',
+            'scheduled_days' => 1, 'scheduled_count' => 2, 'present_count' => 1,
+            'attendance_data_count' => 1, 'absenteeism_count' => 1]],
+        [['week_index' => 0, 'account_id' => 7, 'actual_headcount' => 4]],
+        [],
+    ];
+    $repository = new RampsMetricsRepository($pdo);
+    $weeks = $repository->weeklyMetrics('2026-10-01', '2026-10-09', [], 'standard', '2026-10-02');
+    assertSameValue(2, count($weeks), 'The final partial week was omitted.');
+    assertSameValue('2026-10-07', $weeks[0]['weekEnd'], 'First week has the wrong end.');
+    assertSameValue('2026-10-09', $weeks[1]['weekEnd'], 'Final week was not clipped.');
+    assertSameValue('2026-10-02', $weeks[0]['effectiveWeekEnd'], 'Scope cutoff was lost.');
+    assertSameValue(4, $weeks[0]['accounts'][0]['actualHeadcount'], 'Workforce count was lost.');
+    assertSameValue(0, $weeks[0]['accounts'][1]['actualHeadcount'], 'Missing account was not zero-filled.');
+    assertSameValue(null, $weeks[1]['effectiveWeekEnd'], 'Future week should not have tracking.');
+    assertSameValue(4, count($pdo->queries), 'RAMPS query count grew with account/week count.');
+});
+
+test('RAMPS modes keep distinct missing-hire and employment predicates', static function (): void {
+    foreach (['standard', 'single_account_fast'] as $mode) {
+        $pdo = new EmployeeDirectoryRecordingPdo();
+        $pdo->fetchAllResults = [[['account_id' => 4]], [], [], []];
+        (new RampsMetricsRepository($pdo))->weeklyMetrics('2026-10-01', '2026-10-07', [4], $mode, '2026-10-06');
+        $workforceSql = $pdo->queries[2];
+        $attendanceSql = $pdo->queries[1];
+        $allowsMissingHire = str_contains($workforceSql, 'e.gy_emp_hiredate IS NULL OR');
+        $allowsMissingLastDay = str_contains($workforceSql, 'e.gy_last_working_day IS NULL OR');
+        assertSameValue($mode === 'single_account_fast', $allowsMissingHire,
+            'Missing hire date predicate diverged from the selected HRIS mode.');
+        assertSameValue($mode === 'single_account_fast', $allowsMissingLastDay,
+            'Missing last-working date predicate diverged from the selected HRIS mode.');
+        assertSameValue($mode === 'single_account_fast',
+            str_contains($attendanceSql, 'aa.last_working_day IS NULL OR'),
+            'Attendance employment predicate diverged from the selected HRIS mode.');
+        assertTrue(str_contains($workforceSql, "= '0000-00-00'"),
+            'Zero-date treatment was omitted.');
+    }
+});
+
+test('RAMPS routes require the existing API bearer token', static function (): void {
+    $keys = testRsaKeys();
+    $jwt = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(app: $app, jwtServiceFactory: static fn (): JwtService => $jwt);
+    $app->addRoutingMiddleware();
+    foreach (['/api/v1/workforce-report-metadata',
+        '/api/v1/workforce-weekly-account-metrics?date_from=2026-10-01&date_to=2026-10-07'] as $uri) {
+        $request = (new ServerRequestFactory())->createServerRequest('GET', $uri);
+        assertSameValue(401, $app->handle($request)->getStatusCode(), 'RAMPS route was not JWT-protected.');
+    }
+});
+
+test('RAMPS metrics route defaults to standard and echoes the calculation mode', static function (): void {
+    $keys = testRsaKeys();
+    $jwt = new JwtService('kronos-api', 'kronos-api-clients', 3600, $keys['private_path'], $keys['public_path']);
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchAllResults = [[['account_id' => 4]], [], [], []];
+    $app = AppFactory::create();
+    $routes = require __DIR__ . '/../routes/api.php';
+    $routes(
+        app: $app,
+        jwtServiceFactory: static fn (): JwtService => $jwt,
+        rampsMetricsRepositoryFactory: static fn (): RampsMetricsRepository => new RampsMetricsRepository($pdo)
+    );
+    $app->addRoutingMiddleware();
+    $request = (new ServerRequestFactory())->createServerRequest(
+        'GET', '/api/v1/workforce-weekly-account-metrics?date_from=2026-10-01&date_to=2026-10-07&account_ids=4'
+    )->withHeader('Authorization', 'Bearer ' . $jwt->issue(['id' => 7, 'client_name' => 'SiBS HRIS']));
+    $response = $app->handle($request);
+    assertSameValue(200, $response->getStatusCode(), 'Valid RAMPS request was rejected.');
+    $body = responseJson($response);
+    assertSameValue('standard', $body['data']['calculation_mode'] ?? null, 'Default mode was not explicit in the response.');
+    assertSameValue(1, count($body['data']['weeks'] ?? []), 'The week window was not returned.');
 });
