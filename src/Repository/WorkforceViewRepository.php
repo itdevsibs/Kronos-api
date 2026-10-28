@@ -141,22 +141,25 @@ final class WorkforceViewRepository
         }
 
         $adjustments = [];
+        $overtimeRequests = [];
         if ($trackerIds !== []) {
             $ids = array_values($trackerIds);
             $placeholders = implode(', ', array_fill(0, count($ids), '?'));
 
-            // One batched query for the current page, not N+1 requests.
-            // The latest type-7 adjustment wins, including ties/null dates.
+            // One batched query: type 7 = tracker adjustment,
+            // type 6 = overtime approval. Select the latest request
+            // PER tracker AND type so the workflows stay independent.
+            // A new pending/denied request cannot reuse an old approval.
             $sql = 'SELECT '
                 . 'x.gy_tracker_id, x.gy_esc_id, x.gy_esc_type, '
-                . 'x.gy_esc_status, x.gy_esc_date '
+                . 'x.gy_esc_status, x.gy_esc_date, x.gy_tracker_ot '
                 . 'FROM gy_escalate x '
-                . 'WHERE x.gy_esc_type = 7 '
+                . 'WHERE x.gy_esc_type IN (6, 7) '
                 . 'AND x.gy_tracker_id IN (' . $placeholders . ') '
                 . 'AND x.gy_esc_id = ( '
                 . 'SELECT newer.gy_esc_id FROM gy_escalate newer '
                 . 'WHERE newer.gy_tracker_id = x.gy_tracker_id '
-                . 'AND newer.gy_esc_type = 7 '
+                . 'AND newer.gy_esc_type = x.gy_esc_type '
                 . 'ORDER BY newer.gy_esc_date DESC, newer.gy_esc_id DESC '
                 . 'LIMIT 1 )';
 
@@ -166,8 +169,13 @@ final class WorkforceViewRepository
             }
             $statement->execute();
 
-            foreach ($statement->fetchAll(PDO::FETCH_ASSOC) as $adjustment) {
-                $adjustments[(int) $adjustment['gy_tracker_id']] = $adjustment;
+            foreach ($statement->fetchAll(PDO::FETCH_ASSOC) as $escalation) {
+                $id = (int) $escalation['gy_tracker_id'];
+                if ((int) $escalation['gy_esc_type'] === 6) {
+                    $overtimeRequests[$id] = $escalation;
+                } else {
+                    $adjustments[$id] = $escalation;
+                }
             }
         }
 
@@ -190,8 +198,39 @@ final class WorkforceViewRepository
             $row['schedule_adjustment_status'] = $override;
             $row['effective_attendance_status'] = $override;
 
-            // The controller is responsible for the final display status:
-            // Escalating > explicit approve/pending/reject > Unknown.
+            // Approved OT is a separate workflow (gy_esc_type = 6).
+            // gy_esc_status: 0 pending, 1 approved, 2 denied.
+            // Only an approved latest request can contribute OT hours.
+            $overtime = $overtimeRequests[$id] ?? null;
+            $otStatus = $overtime !== null
+                ? (int) $overtime['gy_esc_status']
+                : null;
+            $row['ot_approval_id'] = $overtime['gy_esc_id'] ?? null;
+            $row['ot_approval_status'] = $otStatus;
+            $row['ot_approval_date'] = $overtime['gy_esc_date'] ?? null;
+            $row['ot_requested_hours'] = $overtime !== null
+                ? (float) ($overtime['gy_tracker_ot'] ?? 0)
+                : null;
+
+            // NULL means no type-6 request: the HRIS may preserve legacy OT.
+            // Zero means an actual OT request exists but is not approved.
+            // The tracker value is a compatibility fallback ONLY when the
+            // type-6 request is approved but its recorded OT hours are zero.
+            $approvedHours = null;
+            if ($overtime !== null) {
+                $approvedHours = 0.0;
+                if ($otStatus === 1) {
+                    $requestedHours = max(0.0, (float) ($overtime['gy_tracker_ot'] ?? 0));
+                    $trackerHours = max(0.0, (float) ($row['gy_tracker_ot'] ?? 0));
+                    $approvedHours = $requestedHours > 0
+                        ? $requestedHours
+                        : $trackerHours;
+                }
+            }
+            $row['approved_ot_hours'] = $approvedHours;
+
+            // The controller is responsible for the final attendance
+            // status; OT approval never changes Approved/Pending/Escalating.
         }
         unset($row);
 
