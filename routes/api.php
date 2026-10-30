@@ -21,6 +21,7 @@ use Sibs\KronosApi\Controller\DtrRelationshipController;
 use Sibs\KronosApi\Controller\DtrViewController;
 use Sibs\KronosApi\Controller\EmployeeAccountAssignmentController;
 use Sibs\KronosApi\Controller\EmployeeController;
+use Sibs\KronosApi\Controller\EmployeeStatutoryPresenceController;
 use Sibs\KronosApi\Controller\EmployeeDirectoryController;
 use Sibs\KronosApi\Controller\EmployeeRelationshipController;
 use Sibs\KronosApi\Controller\EmployeeScheduleController;
@@ -60,6 +61,7 @@ use Sibs\KronosApi\Repository\EmployeeDirectoryRepository;
 use Sibs\KronosApi\Repository\EmployeeRelationshipRepository;
 use Sibs\KronosApi\Repository\EmployeeScheduleRepository;
 use Sibs\KronosApi\Repository\EmployeeRepository;
+use Sibs\KronosApi\Repository\EmployeeStatutoryPresenceRepository;
 use Sibs\KronosApi\Repository\IndividualResourceRepository;
 use Sibs\KronosApi\Repository\HolidayRelationshipRepository;
 use Sibs\KronosApi\Repository\HolidayViewRepository;
@@ -180,6 +182,18 @@ return function (
         ])
     );
     $employeeController = new EmployeeController($employeeRepositoryFactory);
+
+    $employeeStatutoryPresenceController = new EmployeeStatutoryPresenceController(
+        static fn (): EmployeeStatutoryPresenceRepository => new EmployeeStatutoryPresenceRepository(
+            Database::connect([
+                'DB1_HOST' => Environment::get('DB1_HOST'),
+                'DB1_PORT' => Environment::get('DB1_PORT'),
+                'DB1_NAME' => Environment::get('DB1_NAME'),
+                'DB1_USER' => Environment::get('DB1_USER'),
+                'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
+            ])
+        )
+    );
 
     $userRepositoryFactory ??= static fn (): UserRepository => new UserRepository(
         Database::connect([
@@ -530,6 +544,11 @@ return function (
         $jwtService,
         $app->getResponseFactory()
     ));
+
+    // Government ID values never leave Kronos; only presence flags are exposed.
+    $app->get('/api/v1/employee-statutory-presence',
+        [$employeeStatutoryPresenceController, 'index']
+    )->add(new JwtAuthMiddleware($jwtService, $app->getResponseFactory()));
 
     $app->get(
         '/api/v1/employee-directory',
