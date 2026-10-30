@@ -20,12 +20,12 @@ final class ResigneeDirectoryRepository
     public function __construct(private readonly PDO $pdo) {}
 
     /**
-     * Build parameterized WHERE, including one latest row per SIBS ID.
+     * Build parameterized WHERE for inactive employees.
      * Account IDs are passed by HRIS after mapping its master departments;
      * they never become SQL identifiers.
      *
      * @param array{search: string, account: string, accountIds: list<int>, accountMatchIds: list<int>, searchAccountIds: list<int>} $filters
-     * @return array{sql: string, values: list<mixed>}
+     * @return array{sql: string, values: array<string, mixed>}
      */
     public static function buildConditions(array $filters): array
     {
@@ -37,24 +37,28 @@ final class ResigneeDirectoryRepository
             self::LAST_WORKING_DAY . ' <= ' . self::MANILA_TODAY,
         ];
         $values = [];
+        $parameterNumber = 0;
+        $parameter = static function (mixed $value) use (&$values, &$parameterNumber): string {
+            $name = ':filter_' . (++$parameterNumber);
+            $values[$name] = $value;
+            return $name;
+        };
         $search = trim($filters['search'] ?? '');
         if ($search !== '') {
             $match = '%' . $search . '%';
             $terms = [
-                'TRIM(e.gy_emp_code) LIKE ?',
-                'e.gy_emp_fname LIKE ?',
-                'e.gy_emp_mname LIKE ?',
-                'e.gy_emp_lname LIKE ?',
-                "CONCAT_WS(' ', e.gy_emp_fname, e.gy_emp_mname, e.gy_emp_lname) LIKE ?",
-                'u.gy_full_name LIKE ?',
-                'e.gy_emp_account LIKE ?',
-                "CONCAT(TRIM(e.gy_emp_lname), ', ', TRIM(e.gy_emp_fname)) LIKE ?",
+                'TRIM(e.gy_emp_code) LIKE ' . $parameter($match),
+                'e.gy_emp_fname LIKE ' . $parameter($match),
+                'e.gy_emp_mname LIKE ' . $parameter($match),
+                'e.gy_emp_lname LIKE ' . $parameter($match),
+                "CONCAT_WS(' ', e.gy_emp_fname, e.gy_emp_mname, e.gy_emp_lname) LIKE " . $parameter($match),
+                'u.gy_full_name LIKE ' . $parameter($match),
+                'e.gy_emp_account LIKE ' . $parameter($match),
+                "CONCAT(TRIM(e.gy_emp_lname), ', ', TRIM(e.gy_emp_fname)) LIKE " . $parameter($match),
             ];
-            array_push($values, ...array_fill(0, count($terms), $match));
             $searchAccountIds = $filters['searchAccountIds'] ?? [];
             if ($searchAccountIds !== []) {
-                $terms[] = 'e.gy_acc_id IN (' . implode(', ', array_fill(0, count($searchAccountIds), '?')) . ')';
-                array_push($values, ...$searchAccountIds);
+                $terms[] = 'e.gy_acc_id IN (' . implode(', ', array_map($parameter, $searchAccountIds)) . ')';
             }
             $where[] = '(' . implode(' OR ', $terms) . ')';
         }
@@ -66,18 +70,15 @@ final class ResigneeDirectoryRepository
             $accountMatchIds = $filters['accountMatchIds'] ?? [];
             if ($accountMatchIds !== []) {
                 $where[] = '(e.gy_acc_id IN ('
-                    . implode(', ', array_fill(0, count($accountMatchIds), '?'))
-                    . ') OR LOWER(TRIM(e.gy_emp_account)) = ?)';
-                array_push($values, ...$accountMatchIds);
+                    . implode(', ', array_map($parameter, $accountMatchIds))
+                    . ') OR LOWER(TRIM(e.gy_emp_account)) = ' . $parameter($account) . ')';
             } else {
-                $where[] = 'LOWER(TRIM(e.gy_emp_account)) = ?';
+                $where[] = 'LOWER(TRIM(e.gy_emp_account)) = ' . $parameter($account);
             }
-            $values[] = $account;
         }
         if (($filters['accountIds'] ?? []) !== []) {
             $accountIds = $filters['accountIds'];
-            $where[] = 'e.gy_acc_id IN (' . implode(', ', array_fill(0, count($accountIds), '?')) . ')';
-            array_push($values, ...$accountIds);
+            $where[] = 'e.gy_acc_id IN (' . implode(', ', array_map($parameter, $accountIds)) . ')';
         }
         return ['sql' => 'WHERE ' . implode(' AND ', $where), 'values' => $values];
     }
@@ -112,8 +113,8 @@ final class ResigneeDirectoryRepository
             . 'e.gy_acc_id AS accountId, e.gy_emp_account AS fallbackAccount, '
             . 'e.gy_emp_hiredate AS hireDate, ' . $last . ' AS lastWorkingDate, '
             . 'u.gy_user_status AS userStatus ' . $base
-            . ' ORDER BY ' . $last . ' DESC, e.gy_emp_id DESC LIMIT ? OFFSET ?';
-        $data = $this->run($sql, [...$condition['values'], $limit, $offset])->fetchAll(PDO::FETCH_ASSOC);
+            . ' ORDER BY ' . $last . ' DESC, e.gy_emp_id DESC LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+        $data = $this->run($sql, $condition['values'])->fetchAll(PDO::FETCH_ASSOC);
         return [
             'data' => $data,
             'stats' => $stats,
@@ -126,15 +127,15 @@ final class ResigneeDirectoryRepository
         ];
     }
 
-    /** @param list<mixed> $values */
+    /** @param array<string, mixed> $values */
     private function run(string $sql, array $values): \PDOStatement
     {
         $statement = $this->pdo->prepare($sql);
         if ($statement === false) {
             throw new RuntimeException('Failed to prepare Kronos resignee query.');
         }
-        foreach ($values as $index => $value) {
-            $statement->bindValue($index + 1, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+        foreach ($values as $name => $value) {
+            $statement->bindValue($name, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
         }
         $statement->execute();
         return $statement;
