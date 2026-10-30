@@ -26,7 +26,15 @@ final class ResigneeDirectoryController
         } catch (InvalidArgumentException) {
             return $this->json($response, 400, ['success' => false, 'message' => 'Invalid resignee query parameters.']);
         } catch (Throwable $exception) {
-            error_log('[Kronos resignees] ' . get_class($exception) . ': ' . $exception->getMessage());
+            // Log the real exception on the server; never expose SQL or paths to API callers.
+            error_log(sprintf(
+                '[Kronos resignees] %s: %s at %s:%d | previous: %s',
+                get_class($exception),
+                $exception->getMessage(),
+                $exception->getFile(),
+                $exception->getLine(),
+                $exception->getPrevious() ? $exception->getPrevious()->getMessage() : 'none'
+            ));
             return $this->json($response, 500, ['success' => false, 'message' => 'Resignee data unavailable.']);
         }
     }

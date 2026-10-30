@@ -12,23 +12,10 @@ final class ResigneeDirectoryRepository
 {
     private const MANILA_TODAY = "DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR)";
     private const LAST_WORKING_DAY = 'DATE(e.gy_last_working_day)';
-    // Do not run a MAX(id) correlated subquery for every joined row. On
-    // Hostinger shared hosting those scans can exhaust the API request time.
-    // Materialize one latest row per normalized SIBS ID in each table first.
-    // This retains the original latest-employee/latest-user semantics, even
-    // when an identifier contains leading or trailing whitespace.
-    private const FROM_TABLES = 'FROM ('
-        . 'SELECT TRIM(gy_emp_code) AS employeeCode, MAX(gy_emp_id) AS latestEmployeeId '
-        . 'FROM gy_employee WHERE gy_emp_code IS NOT NULL AND TRIM(gy_emp_code) <> \'\' '
-        . 'GROUP BY TRIM(gy_emp_code)'
-        . ') latestEmployee '
-        . 'INNER JOIN gy_employee e ON e.gy_emp_id = latestEmployee.latestEmployeeId '
-        . 'INNER JOIN ('
-        . 'SELECT TRIM(gy_user_code) AS employeeCode, MAX(gy_user_id) AS latestUserId '
-        . 'FROM gy_user WHERE gy_user_code IS NOT NULL AND TRIM(gy_user_code) <> \'\' '
-        . 'GROUP BY TRIM(gy_user_code)'
-        . ') latestUser ON latestUser.employeeCode = latestEmployee.employeeCode '
-        . 'INNER JOIN gy_user u ON u.gy_user_id = latestUser.latestUserId ';
+    // Follow the working Employee Directory API's direct table join.
+    // Avoid derived-table materialization that can fail on production hosting.
+    private const FROM_TABLES = 'FROM gy_employee e '
+        . 'INNER JOIN gy_user u ON TRIM(u.gy_user_code) = TRIM(e.gy_emp_code) ';
 
     public function __construct(private readonly PDO $pdo) {}
 
