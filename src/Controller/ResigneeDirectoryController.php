@@ -75,7 +75,7 @@ final class ResigneeDirectoryController
 
     private function json(ResponseInterface $response, int $status, array $data): ResponseInterface
     {
-        $response->getBody()->write(json_encode($data, JSON_THROW_ON_ERROR));
+        $response->getBody()->write(json_encode($data, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE));
         return $response->withStatus($status)
             ->withHeader('Content-Type', 'application/json')
             ->withHeader('Cache-Control', 'private, no-store');
