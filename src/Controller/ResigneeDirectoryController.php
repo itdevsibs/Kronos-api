@@ -15,7 +15,10 @@ use Throwable;
 final class ResigneeDirectoryController
 {
     /** @param Closure(): ResigneeDirectoryRepository $repositoryFactory */
-    public function __construct(private readonly Closure $repositoryFactory) {}
+    public function __construct(
+        private readonly Closure $repositoryFactory,
+        private readonly string $adminSetupKey = ''
+    ) {}
 
     public function index(ServerRequestInterface $request, ResponseInterface $response): ResponseInterface
     {
@@ -35,7 +38,20 @@ final class ResigneeDirectoryController
                 $exception->getLine(),
                 $exception->getPrevious() ? $exception->getPrevious()->getMessage() : 'none'
             ));
-            return $this->json($response, 500, ['success' => false, 'message' => 'Resignee data unavailable.']);
+            $body = ['success' => false, 'message' => 'Resignee data unavailable.'];
+            $providedKey = $request->getHeaderLine('X-Admin-Setup-Key');
+            if ($this->adminSetupKey !== '' && $providedKey !== ''
+                && hash_equals($this->adminSetupKey, $providedKey)) {
+                // Temporary, admin-only production diagnostic; remove after the error is identified.
+                $body['error'] = [
+                    'type' => get_class($exception),
+                    'code' => $exception->getCode(),
+                    'message' => $exception->getMessage(),
+                    'file' => $exception->getFile(),
+                    'line' => $exception->getLine(),
+                ];
+            }
+            return $this->json($response, 500, $body);
         }
     }
 

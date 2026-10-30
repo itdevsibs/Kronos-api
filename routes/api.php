@@ -206,7 +206,8 @@ return function (
                 'DB1_USER' => Environment::get('DB1_USER'),
                 'DB1_PASSWORD' => Environment::get('DB1_PASSWORD'),
             ])
-        )
+        ),
+        Environment::get('API_ADMIN_SETUP_KEY') ?? ''
     );
 
     $userRepositoryFactory ??= static fn (): UserRepository => new UserRepository(
