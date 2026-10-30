@@ -94,7 +94,8 @@ final class ResigneeDirectoryRepository
         $summary = 'SELECT COUNT(*) AS total, '
             . "COALESCE(SUM(CASE WHEN $last >= DATE_FORMAT($today, '%Y-%m-01') THEN 1 ELSE 0 END), 0) AS thisMonth, "
             . "COALESCE(SUM(CASE WHEN $last >= DATE_SUB($today, INTERVAL 29 DAY) THEN 1 ELSE 0 END), 0) AS last30Days, "
-            . "COUNT(DISTINCT COALESCE(NULLIF(NULLIF(TRIM(CAST(e.gy_acc_id AS CHAR)), ''), '0'), NULLIF(TRIM(e.gy_emp_account), ''))) AS accounts "
+            . "COUNT(DISTINCT COALESCE(NULLIF(NULLIF(CONVERT(TRIM(CAST(e.gy_acc_id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci, ''), '0'), "
+            . "NULLIF(CONVERT(TRIM(e.gy_emp_account) USING utf8mb4) COLLATE utf8mb4_unicode_ci, ''))) AS accounts "
             . $base;
         $statsRow = $this->run($summary, $condition['values'])->fetch(PDO::FETCH_ASSOC) ?: [];
         $stats = [

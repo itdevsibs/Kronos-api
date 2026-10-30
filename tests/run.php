@@ -41,6 +41,7 @@ use Sibs\KronosApi\Controller\UserController;
 use Sibs\KronosApi\Controller\WorkforceRelationshipController;
 use Sibs\KronosApi\Controller\WorkforceViewController;
 use Sibs\KronosApi\Controller\RampsMetricsController;
+use Sibs\KronosApi\Controller\ResigneeDirectoryController;
 use Sibs\KronosApi\Config\BatchTableConfig;
 use Sibs\KronosApi\Database\Database;
 use Sibs\KronosApi\Environment;
@@ -79,6 +80,7 @@ use Sibs\KronosApi\Repository\ToolRelationshipRepository;
 use Sibs\KronosApi\Repository\WorkforceRelationshipRepository;
 use Sibs\KronosApi\Repository\WorkforceViewRepository;
 use Sibs\KronosApi\Repository\RampsMetricsRepository;
+use Sibs\KronosApi\Repository\ResigneeDirectoryRepository;
 use Sibs\KronosApi\Service\ApiClientService;
 use Sibs\KronosApi\Service\ApiTokenService;
 use Sibs\KronosApi\Service\JwtService;
@@ -5985,4 +5987,72 @@ test('RAMPS metrics route defaults to standard and echoes the calculation mode',
     $body = responseJson($response);
     assertSameValue('standard', $body['data']['calculation_mode'] ?? null, 'Default mode was not explicit in the response.');
     assertSameValue(1, count($body['data']['weeks'] ?? []), 'The week window was not returned.');
+});
+
+test('resignee errors reveal exact diagnostics only with the configured admin setup key', static function (): void {
+    $failure = static function (): ResigneeDirectoryRepository {
+        throw new RuntimeException('SQLSTATE[42S22]: Column not found: 1054 Unknown column');
+    };
+    $factory = new ResponseFactory();
+    $request = (new ServerRequestFactory())->createServerRequest('GET', '/api/v1/resignees');
+    $controller = new ResigneeDirectoryController($failure, 'test-setup-key');
+
+    foreach (['', 'wrong-key'] as $providedKey) {
+        $response = $controller->index(
+            $request->withHeader('X-Admin-Setup-Key', $providedKey),
+            $factory->createResponse()
+        );
+        assertSameValue(500, $response->getStatusCode(), 'Resignee failure changed status.');
+        assertSameValue(
+            ['success' => false, 'message' => 'Resignee data unavailable.'],
+            responseJson($response),
+            'Resignee error leaked without the valid admin setup key.'
+        );
+    }
+
+    $response = $controller->index(
+        $request->withHeader('X-Admin-Setup-Key', 'test-setup-key'),
+        $factory->createResponse()
+    );
+    $body = responseJson($response);
+    assertSameValue(500, $response->getStatusCode(), 'Diagnostic response changed status.');
+    assertSameValue('RuntimeException', $body['error']['type'] ?? null, 'Exception type was not returned.');
+    assertSameValue('SQLSTATE[42S22]: Column not found: 1054 Unknown column',
+        $body['error']['message'] ?? null, 'Exact exception message was not returned.');
+    assertTrue(isset($body['error']['file'], $body['error']['line']), 'Exception location was not returned.');
+
+    $unconfigured = new ResigneeDirectoryController($failure, '');
+    $response = $unconfigured->index($request, $factory->createResponse());
+    assertSameValue(
+        ['success' => false, 'message' => 'Resignee data unavailable.'],
+        responseJson($response),
+        'An empty configured admin key exposed the exception.'
+    );
+});
+
+test('resignee account summary normalizes both fallback values to one collation', static function (): void {
+    $pdo = new EmployeeDirectoryRecordingPdo();
+    $pdo->fetchResults[0] = [
+        'total' => 0,
+        'thisMonth' => 0,
+        'last30Days' => 0,
+        'accounts' => 0,
+    ];
+    $pdo->fetchAllResults[1] = [];
+    (new ResigneeDirectoryRepository($pdo))->findPage(1, 15, [
+        'search' => '',
+        'account' => '',
+        'accountIds' => [],
+        'accountMatchIds' => [],
+        'searchAccountIds' => [],
+    ]);
+
+    assertSameValue(2, count($pdo->queries), 'Resignee query count changed.');
+    $summary = $pdo->queries[0];
+    assertTrue(str_contains($summary,
+        'CONVERT(TRIM(CAST(e.gy_acc_id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci'),
+        'Account ID fallback retained the connection-dependent cast collation.');
+    assertTrue(str_contains($summary,
+        'CONVERT(TRIM(e.gy_emp_account) USING utf8mb4) COLLATE utf8mb4_unicode_ci'),
+        'Legacy account name retained its column-dependent collation.');
 });
