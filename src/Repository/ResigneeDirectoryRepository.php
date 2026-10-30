@@ -10,7 +10,7 @@ use RuntimeException;
 /** Read-only, database-side search and pagination for inactive Kronos users. */
 final class ResigneeDirectoryRepository
 {
-    private const MANILA_TODAY = "DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00'))";
+    private const MANILA_TODAY = "DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR)";
     private const LAST_WORKING_DAY = 'DATE(e.gy_last_working_day)';
     // Do not run a MAX(id) correlated subquery for every joined row. On
     // Hostinger shared hosting those scans can exhaust the API request time.
@@ -107,7 +107,7 @@ final class ResigneeDirectoryRepository
         $summary = 'SELECT COUNT(*) AS total, '
             . "COALESCE(SUM(CASE WHEN $last >= DATE_FORMAT($today, '%Y-%m-01') THEN 1 ELSE 0 END), 0) AS thisMonth, "
             . "COALESCE(SUM(CASE WHEN $last >= DATE_SUB($today, INTERVAL 29 DAY) THEN 1 ELSE 0 END), 0) AS last30Days, "
-            . "COUNT(DISTINCT COALESCE(NULLIF(TRIM(CAST(e.gy_acc_id AS CHAR)), ''), NULLIF(TRIM(e.gy_emp_account), ''))) AS accounts "
+            . "COUNT(DISTINCT COALESCE(NULLIF(NULLIF(TRIM(CAST(e.gy_acc_id AS CHAR)), ''), '0'), NULLIF(TRIM(e.gy_emp_account), ''))) AS accounts "
             . $base;
         $statsRow = $this->run($summary, $condition['values'])->fetch(PDO::FETCH_ASSOC) ?: [];
         $stats = [

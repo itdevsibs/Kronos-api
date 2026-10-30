@@ -26,7 +26,7 @@ final class ResigneeDirectoryController
         } catch (InvalidArgumentException) {
             return $this->json($response, 400, ['success' => false, 'message' => 'Invalid resignee query parameters.']);
         } catch (Throwable $exception) {
-            error_log('[Kronos resignees] ' . $exception->getMessage());
+            error_log('[Kronos resignees] ' . get_class($exception) . ': ' . $exception->getMessage());
             return $this->json($response, 500, ['success' => false, 'message' => 'Resignee data unavailable.']);
         }
     }
@@ -75,7 +75,7 @@ final class ResigneeDirectoryController
 
     private function json(ResponseInterface $response, int $status, array $data): ResponseInterface
     {
-        $response->getBody()->write(json_encode($data, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE));
+        $response->getBody()->write(json_encode($data, JSON_THROW_ON_ERROR));
         return $response->withStatus($status)
             ->withHeader('Content-Type', 'application/json')
             ->withHeader('Cache-Control', 'private, no-store');
