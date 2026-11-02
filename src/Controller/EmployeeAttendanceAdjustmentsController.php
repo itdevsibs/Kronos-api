@@ -77,6 +77,18 @@ final class EmployeeAttendanceAdjustmentsController
                 );
             }
 
+            // Bound attendance queries before any database work.
+            $today = new DateTimeImmutable('today', new \DateTimeZone('Asia/Manila'));
+            $from = $filters['date_from'] ?? $today->modify('-30 days')->format('Y-m-d');
+            $to = $filters['date_to'] ?? $today->format('Y-m-d');
+            if ($from < '2011-01-01' || $to > $today->format('Y-m-d')
+                || $from > $to
+                || (new DateTimeImmutable($from))->diff(new DateTimeImmutable($to))->days > 30) {
+                throw new InvalidArgumentException('Attendance dates must be between 2011-01-01 and today, with a maximum range of 31 days.');
+            }
+            $filters['date_from'] = $from;
+            $filters['date_to'] = $to;
+
             $repository = ($this->repositoryFactory)();
 
             if (!$repository instanceof WorkforceViewRepository) {

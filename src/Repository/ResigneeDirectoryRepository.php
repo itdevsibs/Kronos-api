@@ -86,7 +86,29 @@ final class ResigneeDirectoryRepository
     /** @param array{search: string, account: string, accountIds: list<int>, accountMatchIds: list<int>, searchAccountIds: list<int>} $filters
      * @return array{data: list<array<string, mixed>>, stats: array<string, int>, pagination: array<string, int>}
      */
+    /**
+     * Match the Attendance endpoint's 30-second MySQL SELECT execution limit.
+     * The cap is per statement (summary and page query), not a total HTTP deadline.
+     * Restore the original session value so other Kronos requests are unaffected.
+     */
     public function findPage(int $page, int $limit, array $filters): array
+    {
+        $previous = (int) $this->pdo->query(
+            'SELECT @@SESSION.max_execution_time'
+        )->fetchColumn();
+
+        $this->pdo->exec('SET SESSION max_execution_time = 30000');
+        try {
+            return $this->findPageWithTimeLimit($page, $limit, $filters);
+        } finally {
+            $this->pdo->exec('SET SESSION max_execution_time = ' . $previous);
+        }
+    }
+
+    /** @param array{search: string, account: string, accountIds: list<int>, accountMatchIds: list<int>, searchAccountIds: list<int>} $filters
+     * @return array{data: list<array<string, mixed>>, stats: array<string, int>, pagination: array<string, int>}
+     */
+    private function findPageWithTimeLimit(int $page, int $limit, array $filters): array
     {
         $condition = self::buildConditions($filters);
         $base = self::FROM_TABLES . $condition['sql'];

@@ -93,7 +93,35 @@ final class WorkforceViewRepository
 
     // NEW METHOD - ATTENDANCE WITH SCHEDULE ADJUSTMENTS
     // Independent of the original INNER JOIN attendance query.
+    /**
+     * Apply a 30-second MySQL execution cap to each SELECT in this endpoint.
+     * MySQL max_execution_time is per SELECT, not a cumulative HTTP deadline.
+     * Other repository methods retain their existing database settings.
+     */
     public function findEmployeeAttendanceWithAdjustmentsPage(
+        int $page,
+        int $limit,
+        array $filters
+    ): array {
+        $previous = (int) $this->pdo->query(
+            'SELECT @@SESSION.max_execution_time'
+        )->fetchColumn();
+
+        $this->pdo->exec('SET SESSION max_execution_time = 30000');
+        try {
+            return $this->findEmployeeAttendanceWithAdjustmentsPageQuery(
+                $page,
+                $limit,
+                $filters
+            );
+        } finally {
+            $this->pdo->exec(
+                'SET SESSION max_execution_time = ' . $previous
+            );
+        }
+    }
+
+    private function findEmployeeAttendanceWithAdjustmentsPageQuery(
         int $page,
         int $limit,
         array $filters
