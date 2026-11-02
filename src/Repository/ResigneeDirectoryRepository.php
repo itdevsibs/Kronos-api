@@ -20,12 +20,12 @@ final class ResigneeDirectoryRepository
     public function __construct(private readonly PDO $pdo) {}
 
     /**
-     * Build parameterized WHERE, including one latest row per SIBS ID.
+     * Build parameterized WHERE for inactive employees.
      * Account IDs are passed by HRIS after mapping its master departments;
      * they never become SQL identifiers.
      *
      * @param array{search: string, account: string, accountIds: list<int>, accountMatchIds: list<int>, searchAccountIds: list<int>} $filters
-     * @return array{sql: string, values: list<mixed>}
+     * @return array{sql: string, values: array<string, mixed>}
      */
     public static function buildConditions(array $filters): array
     {
@@ -37,24 +37,28 @@ final class ResigneeDirectoryRepository
             self::LAST_WORKING_DAY . ' <= ' . self::MANILA_TODAY,
         ];
         $values = [];
+        $parameterNumber = 0;
+        $parameter = static function (mixed $value) use (&$values, &$parameterNumber): string {
+            $name = ':filter_' . (++$parameterNumber);
+            $values[$name] = $value;
+            return $name;
+        };
         $search = trim($filters['search'] ?? '');
         if ($search !== '') {
             $match = '%' . $search . '%';
             $terms = [
-                'TRIM(e.gy_emp_code) LIKE ?',
-                'e.gy_emp_fname LIKE ?',
-                'e.gy_emp_mname LIKE ?',
-                'e.gy_emp_lname LIKE ?',
-                "CONCAT_WS(' ', e.gy_emp_fname, e.gy_emp_mname, e.gy_emp_lname) LIKE ?",
-                'u.gy_full_name LIKE ?',
-                'e.gy_emp_account LIKE ?',
-                "CONCAT(TRIM(e.gy_emp_lname), ', ', TRIM(e.gy_emp_fname)) LIKE ?",
+                'TRIM(e.gy_emp_code) LIKE ' . $parameter($match),
+                'e.gy_emp_fname LIKE ' . $parameter($match),
+                'e.gy_emp_mname LIKE ' . $parameter($match),
+                'e.gy_emp_lname LIKE ' . $parameter($match),
+                "CONCAT_WS(' ', e.gy_emp_fname, e.gy_emp_mname, e.gy_emp_lname) LIKE " . $parameter($match),
+                'u.gy_full_name LIKE ' . $parameter($match),
+                'e.gy_emp_account LIKE ' . $parameter($match),
+                "CONCAT(TRIM(e.gy_emp_lname), ', ', TRIM(e.gy_emp_fname)) LIKE " . $parameter($match),
             ];
-            array_push($values, ...array_fill(0, count($terms), $match));
             $searchAccountIds = $filters['searchAccountIds'] ?? [];
             if ($searchAccountIds !== []) {
-                $terms[] = 'e.gy_acc_id IN (' . implode(', ', array_fill(0, count($searchAccountIds), '?')) . ')';
-                array_push($values, ...$searchAccountIds);
+                $terms[] = 'e.gy_acc_id IN (' . implode(', ', array_map($parameter, $searchAccountIds)) . ')';
             }
             $where[] = '(' . implode(' OR ', $terms) . ')';
         }
@@ -66,29 +70,84 @@ final class ResigneeDirectoryRepository
             $accountMatchIds = $filters['accountMatchIds'] ?? [];
             if ($accountMatchIds !== []) {
                 $where[] = '(e.gy_acc_id IN ('
-                    . implode(', ', array_fill(0, count($accountMatchIds), '?'))
-                    . ') OR LOWER(TRIM(e.gy_emp_account)) = ?)';
-                array_push($values, ...$accountMatchIds);
+                    . implode(', ', array_map($parameter, $accountMatchIds))
+                    . ') OR LOWER(TRIM(e.gy_emp_account)) = ' . $parameter($account) . ')';
             } else {
-                $where[] = 'LOWER(TRIM(e.gy_emp_account)) = ?';
+                $where[] = 'LOWER(TRIM(e.gy_emp_account)) = ' . $parameter($account);
             }
-            $values[] = $account;
         }
         if (($filters['accountIds'] ?? []) !== []) {
             $accountIds = $filters['accountIds'];
-            $where[] = 'e.gy_acc_id IN (' . implode(', ', array_fill(0, count($accountIds), '?')) . ')';
-            array_push($values, ...$accountIds);
+            $where[] = 'e.gy_acc_id IN (' . implode(', ', array_map($parameter, $accountIds)) . ')';
         }
         return ['sql' => 'WHERE ' . implode(' AND ', $where), 'values' => $values];
     }
 
-    /** @param array{search: string, account: string, accountIds: list<int>, accountMatchIds: list<int>, searchAccountIds: list<int>} $filters
-     * @return array{data: list<array<string, mixed>>, stats: array<string, int>, pagination: array<string, int>}
+    /**
+     * Keep the existing page response shape while allowing the new HRIS client
+     * to avoid calculating all four dashboard metrics on every page change.
+     * Legacy callers can omit $includeStats and retain the old behaviour.
+     *
+     * @param array<string, mixed> $filters
+     * @return array{data: array, stats: array<string, int>, pagination: array<string, int>}
      */
-    public function findPage(int $page, int $limit, array $filters): array
+    public function findPage(int $page, int $limit, array $filters, bool $includeStats = true): array
     {
-        $condition = self::buildConditions($filters);
-        $base = self::FROM_TABLES . $condition['sql'];
+        return $this->withSelectTimeLimit(function () use ($page, $limit, $filters, $includeStats): array {
+            $condition = self::buildConditions($filters);
+            $base = self::FROM_TABLES . $condition['sql'];
+
+            if ($includeStats) {
+                // Compatibility path for pre-update HRIS clients.
+                $stats = $this->queryStats($condition);
+            } else {
+                // Lightweight total only: pagination still needs an exact count.
+                $total = (int) $this->run('SELECT COUNT(*) ' . $base, $condition['values'])->fetchColumn();
+                $stats = ['total' => $total, 'thisMonth' => 0, 'last30Days' => 0, 'accounts' => 0];
+            }
+
+            $totalPages = max(1, (int) ceil($stats['total'] / $limit));
+            $page = min($page, $totalPages);
+            $offset = ($page - 1) * $limit;
+            $last = self::LAST_WORKING_DAY;
+            $sql = 'SELECT e.gy_emp_id AS employeeId, TRIM(e.gy_emp_code) AS sibsId, '
+                . 'e.gy_emp_fname AS firstName, e.gy_emp_mname AS middleName, '
+                . 'e.gy_emp_lname AS lastName, NULLIF(TRIM(u.gy_full_name), \'\') AS employeeName, '
+                . 'e.gy_acc_id AS accountId, e.gy_emp_account AS fallbackAccount, '
+                . 'e.gy_emp_hiredate AS hireDate, ' . $last . ' AS lastWorkingDate, '
+                . 'u.gy_user_status AS userStatus ' . $base
+                . ' ORDER BY ' . $last . ' DESC, e.gy_emp_id DESC LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+            $data = $this->run($sql, $condition['values'])->fetchAll(PDO::FETCH_ASSOC);
+            return [
+                'data' => $data,
+                'stats' => $stats,
+                'pagination' => [
+                    'currentPage' => $page,
+                    'totalPages' => $totalPages,
+                    'total' => $stats['total'],
+                    'limit' => $limit,
+                ],
+            ];
+        });
+    }
+
+    /** Read only the four metric counts; no employee rows are retrieved. */
+    public function findStats(array $filters): array
+    {
+        return $this->withSelectTimeLimit(function () use ($filters): array {
+            return $this->queryStats(self::buildConditions($filters));
+        });
+    }
+
+    /**
+     * One aggregate SELECT for all four values, rather than four independent
+     * potentially expensive scans or one scan repeated for every page.
+     *
+     * @param array{sql: string, values: array<string, mixed>} $condition
+     * @return array{total: int, thisMonth: int, last30Days: int, accounts: int}
+     */
+    private function queryStats(array $condition): array
+    {
         $last = self::LAST_WORKING_DAY;
         $today = self::MANILA_TODAY;
         $summary = 'SELECT COUNT(*) AS total, '
@@ -96,46 +155,37 @@ final class ResigneeDirectoryRepository
             . "COALESCE(SUM(CASE WHEN $last >= DATE_SUB($today, INTERVAL 29 DAY) THEN 1 ELSE 0 END), 0) AS last30Days, "
             . "COUNT(DISTINCT COALESCE(NULLIF(NULLIF(CONVERT(TRIM(CAST(e.gy_acc_id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci, ''), '0'), "
             . "NULLIF(CONVERT(TRIM(e.gy_emp_account) USING utf8mb4) COLLATE utf8mb4_unicode_ci, ''))) AS accounts "
-            . $base;
-        $statsRow = $this->run($summary, $condition['values'])->fetch(PDO::FETCH_ASSOC) ?: [];
-        $stats = [
-            'total' => (int) ($statsRow['total'] ?? 0),
-            'thisMonth' => (int) ($statsRow['thisMonth'] ?? 0),
-            'last30Days' => (int) ($statsRow['last30Days'] ?? 0),
-            'accounts' => (int) ($statsRow['accounts'] ?? 0),
-        ];
-        $totalPages = max(1, (int) ceil($stats['total'] / $limit));
-        $page = min($page, $totalPages);
-        $offset = ($page - 1) * $limit;
-        $sql = 'SELECT e.gy_emp_id AS employeeId, TRIM(e.gy_emp_code) AS sibsId, '
-            . 'e.gy_emp_fname AS firstName, e.gy_emp_mname AS middleName, '
-            . 'e.gy_emp_lname AS lastName, NULLIF(TRIM(u.gy_full_name), \'\') AS employeeName, '
-            . 'e.gy_acc_id AS accountId, e.gy_emp_account AS fallbackAccount, '
-            . 'e.gy_emp_hiredate AS hireDate, ' . $last . ' AS lastWorkingDate, '
-            . 'u.gy_user_status AS userStatus ' . $base
-            . ' ORDER BY ' . $last . ' DESC, e.gy_emp_id DESC LIMIT ? OFFSET ?';
-        $data = $this->run($sql, [...$condition['values'], $limit, $offset])->fetchAll(PDO::FETCH_ASSOC);
+            . self::FROM_TABLES . $condition['sql'];
+        $row = $this->run($summary, $condition['values'])->fetch(PDO::FETCH_ASSOC) ?: [];
         return [
-            'data' => $data,
-            'stats' => $stats,
-            'pagination' => [
-                'currentPage' => $page,
-                'totalPages' => $totalPages,
-                'total' => $stats['total'],
-                'limit' => $limit,
-            ],
+            'total' => (int) ($row['total'] ?? 0),
+            'thisMonth' => (int) ($row['thisMonth'] ?? 0),
+            'last30Days' => (int) ($row['last30Days'] ?? 0),
+            'accounts' => (int) ($row['accounts'] ?? 0),
         ];
     }
 
-    /** @param list<mixed> $values */
+    /** MySQL max_execution_time caps individual SELECT statements, not the full HTTP request. */
+    private function withSelectTimeLimit(callable $operation): mixed
+    {
+        $previous = (int) $this->pdo->query('SELECT @@SESSION.max_execution_time')->fetchColumn();
+        $this->pdo->exec('SET SESSION max_execution_time = 30000');
+        try {
+            return $operation();
+        } finally {
+            $this->pdo->exec('SET SESSION max_execution_time = ' . $previous);
+        }
+    }
+
+    /** @param array<string, mixed> $values */
     private function run(string $sql, array $values): \PDOStatement
     {
         $statement = $this->pdo->prepare($sql);
         if ($statement === false) {
             throw new RuntimeException('Failed to prepare Kronos resignee query.');
         }
-        foreach ($values as $index => $value) {
-            $statement->bindValue($index + 1, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+        foreach ($values as $name => $value) {
+            $statement->bindValue($name, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
         }
         $statement->execute();
         return $statement;

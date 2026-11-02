@@ -63,6 +63,18 @@ final class WorkforceViewController
             if ($filters['date_from'] !== null && $filters['date_to'] !== null && $filters['date_from'] > $filters['date_to']) {
                 throw new InvalidArgumentException('Invalid date range.');
             }
+            if ($method === 'findEmployeeAttendancePage') {
+                $today = new DateTimeImmutable('today', new \DateTimeZone('Asia/Manila'));
+                $from = $filters['date_from'] ?? $today->modify('-30 days')->format('Y-m-d');
+                $to = $filters['date_to'] ?? $today->format('Y-m-d');
+                if ($from < '2011-01-01' || $to > $today->format('Y-m-d')
+                    || $from > $to
+                    || (new DateTimeImmutable($from))->diff(new DateTimeImmutable($to))->days > 30) {
+                    throw new InvalidArgumentException('Attendance date range exceeds safety limits.');
+                }
+                $filters['date_from'] = $from;
+                $filters['date_to'] = $to;
+            }
             $result = ($this->repositoryFactory)()->{$method}($page, $limit, $filters);
             $total = $result['total'];
             $totalPages = max(1, (int) ceil($total / $limit));

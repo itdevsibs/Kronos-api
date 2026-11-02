@@ -77,6 +77,18 @@ final class EmployeeAttendanceAdjustmentsController
                 );
             }
 
+            // Bound attendance queries before any database work.
+            $today = new DateTimeImmutable('today', new \DateTimeZone('Asia/Manila'));
+            $from = $filters['date_from'] ?? $today->modify('-30 days')->format('Y-m-d');
+            $to = $filters['date_to'] ?? $today->format('Y-m-d');
+            if ($from < '2011-01-01' || $to > $today->format('Y-m-d')
+                || $from > $to
+                || (new DateTimeImmutable($from))->diff(new DateTimeImmutable($to))->days > 30) {
+                throw new InvalidArgumentException('Attendance dates must be between 2011-01-01 and today, with a maximum range of 31 days.');
+            }
+            $filters['date_from'] = $from;
+            $filters['date_to'] = $to;
+
             $repository = ($this->repositoryFactory)();
 
             if (!$repository instanceof WorkforceViewRepository) {
@@ -93,9 +105,10 @@ final class EmployeeAttendanceAdjustmentsController
                 );
 
             
-            // Kronos Daily Logs stays Pending for the first three calendar
-            // dates, based on Philippine time. The fourth date may show the
-            // validated result. A pending type-7 escalation still has priority.
+            // Kronos Daily Logs stays Pending on the tracker date and for
+            // three complete following calendar days in Asia/Manila.
+            // Example: Oct 30 remains Pending on Nov 2; Nov 3 may reflect
+            // the recorded workflow decision. Type-7 escalation still wins.
             $philippineZone = new \DateTimeZone('Asia/Manila');
             $today = new DateTimeImmutable('today', $philippineZone);
 
@@ -119,12 +132,10 @@ final class EmployeeAttendanceAdjustmentsController
                     continue;
                 }
 
-                // Do not label today's, yesterday's, or the previous
-                // calendar day's attendance as Approved merely because
-                // its tracker is completed or an automatic decision exists.
-                // The actual Kronos Daily Logs display is Pending throughout
-                // this review window. We intentionally use midnight in PH
-                // rather than elapsed 24-hour periods.
+                // The pending window includes the tracker date and day 1, 2,
+                // and 3 afterwards. This matches Kronos on the third day
+                // (Oct 30 -> Nov 2) instead of approving one day too early.
+                // Compare Philippine calendar dates, not rolling 24-hour periods.
                 $rawDate = (string) ($row['gy_tracker_date'] ?? '');
                 $trackerDayText = substr($rawDate, 0, 10);
                 $trackerDay = DateTimeImmutable::createFromFormat(
@@ -137,7 +148,7 @@ final class EmployeeAttendanceAdjustmentsController
                     $trackerDay instanceof DateTimeImmutable
                     && $trackerDay->format('Y-m-d') === $trackerDayText
                     && $trackerDay <= $today
-                    && $today < $trackerDay->modify('+3 days')
+                    && $today <= $trackerDay->modify('+3 days')
                 ) {
                     $row['attendance_status'] = 'Pending';
                     $row['attendance_status_source'] = 'kronos_three_day_review';
