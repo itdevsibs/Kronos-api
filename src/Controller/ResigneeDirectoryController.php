@@ -24,7 +24,7 @@ final class ResigneeDirectoryController
     {
         try {
             $input = self::parseQuery($request->getQueryParams());
-            $result = ($this->repositoryFactory)()->findPage($input['page'], $input['limit'], $input);
+            $result = ($this->repositoryFactory)()->findPage($input['page'], $input['limit'], $input, $input['includeStats']);
             return $this->json($response, 200, ['success' => true, ...$result]);
         } catch (InvalidArgumentException) {
             return $this->json($response, 400, ['success' => false, 'message' => 'Invalid resignee query parameters.']);
@@ -52,6 +52,21 @@ final class ResigneeDirectoryController
                 ];
             }
             return $this->json($response, 500, $body);
+        }
+    }
+
+    /** Return counts separately from the paginated employee records. */
+    public function stats(ServerRequestInterface $request, ResponseInterface $response): ResponseInterface
+    {
+        try {
+            $input = self::parseQuery($request->getQueryParams());
+            $stats = ($this->repositoryFactory)()->findStats($input);
+            return $this->json($response, 200, ['success' => true, 'stats' => $stats]);
+        } catch (InvalidArgumentException) {
+            return $this->json($response, 400, ['success' => false, 'message' => 'Invalid resignee query parameters.']);
+        } catch (Throwable $exception) {
+            error_log(sprintf('[Kronos resignees stats] %s: %s', get_class($exception), $exception->getMessage()));
+            return $this->json($response, 500, ['success' => false, 'message' => 'Resignee counts unavailable.']);
         }
     }
 
@@ -87,6 +102,7 @@ final class ResigneeDirectoryController
             return array_values(array_unique($parsed));
         };
         return [
+            'includeStats' => !isset($input['include_stats']) || (string) $input['include_stats'] !== '0',
             'page' => $positive($input['page'] ?? null, 1, 1000000),
             'limit' => $positive($input['limit'] ?? null, 15, 50),
             'search' => $short($input['search'] ?? null),

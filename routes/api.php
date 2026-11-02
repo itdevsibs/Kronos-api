@@ -562,6 +562,9 @@ return function (
 
     // Government ID values never leave Kronos; only presence flags are exposed.
     // Read-only, paginated Kronos Resignee directory; validated JWT required.
+    $app->get('/api/v1/resignees/stats', [$resigneeDirectoryController, 'stats'])
+        ->add(new JwtAuthMiddleware($jwtService, $app->getResponseFactory()));
+
     $app->get('/api/v1/resignees', [$resigneeDirectoryController, 'index'])
         ->add(new JwtAuthMiddleware($jwtService, $app->getResponseFactory()));
 

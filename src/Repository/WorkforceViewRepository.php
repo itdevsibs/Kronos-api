@@ -101,7 +101,8 @@ final class WorkforceViewRepository
     public function findEmployeeAttendanceWithAdjustmentsPage(
         int $page,
         int $limit,
-        array $filters
+        array $filters,
+        bool $fast = false
     ): array {
         $previous = (int) $this->pdo->query(
             'SELECT @@SESSION.max_execution_time'
@@ -112,7 +113,8 @@ final class WorkforceViewRepository
             return $this->findEmployeeAttendanceWithAdjustmentsPageQuery(
                 $page,
                 $limit,
-                $filters
+                $filters,
+                $fast
             );
         } finally {
             $this->pdo->exec(
@@ -121,10 +123,38 @@ final class WorkforceViewRepository
         }
     }
 
+    /**
+     * Fetch an exact total separately from page rows. No schedule or escalation
+     * enrichment is performed. Simple date/account/code counts touch gy_tracker
+     * only; optional employee/account joins are kept for search/department.
+     */
+    public function countEmployeeAttendanceWithAdjustments(array $filters): int
+    {
+        $previous = (int) $this->pdo->query('SELECT @@SESSION.max_execution_time')->fetchColumn();
+        $this->pdo->exec('SET SESSION max_execution_time = 30000');
+        try {
+            [$where, $bindings] = $this->adjustmentTrackerFilters($filters);
+            $needsEmployeeJoin = isset($filters['search']) || isset($filters['department_id']);
+            $from = 'FROM gy_tracker t ';
+            if ($needsEmployeeJoin) {
+                $from .= 'LEFT JOIN gy_employee e ON TRIM(t.gy_emp_code) = TRIM(e.gy_emp_code) '
+                    . 'LEFT JOIN gy_accounts a ON t.gy_account_id = a.gy_acc_id ';
+            }
+            $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+            $stmt = $this->prepare('SELECT COUNT(*) AS total ' . $from . $whereSql);
+            $this->bindAll($stmt, $bindings);
+            $stmt->execute();
+            return (int) ($stmt->fetchColumn() ?: 0);
+        } finally {
+            $this->pdo->exec('SET SESSION max_execution_time = ' . $previous);
+        }
+    }
+
     private function findEmployeeAttendanceWithAdjustmentsPageQuery(
         int $page,
         int $limit,
-        array $filters
+        array $filters,
+        bool $fast = false
     ): array {
         // Filter on gy_tracker itself, so an unmatched gy_employee row
         // never causes a valid attendance tracker to disappear.
@@ -153,7 +183,8 @@ final class WorkforceViewRepository
             $bindings,
             't.gy_tracker_date DESC, t.gy_tracker_id DESC',
             $page,
-            $limit
+            $limit,
+            $fast
         );
 
         if ($result['data'] === []) {
@@ -430,6 +461,15 @@ final class WorkforceViewRepository
             $where, $bindings, $filters,
             'account_id', 't.gy_account_id', ':account_id'
         );
+        if (!empty($filters['account_ids'])) {
+            $placeholders = [];
+            foreach ($filters['account_ids'] as $index => $accountId) {
+                $placeholder = ':account_scope_' . $index;
+                $placeholders[] = $placeholder;
+                $bindings[$placeholder] = [(int) $accountId, PDO::PARAM_INT];
+            }
+            $where[] = 't.gy_account_id IN (' . implode(', ', $placeholders) . ')';
+        }
         $this->addIntFilter(
             $where, $bindings, $filters,
             'department_id', 'a.gy_dept_id', ':department_id'
@@ -645,31 +685,26 @@ final class WorkforceViewRepository
         array $bindings,
         string $order,
         int $page,
-        int $limit
+        int $limit,
+        bool $fast = false
     ): array {
         $whereSql = $where === []
             ? ''
             : 'WHERE ' . implode(' AND ', $where) . ' ';
 
-        $count = $this->prepare(
-            'SELECT COUNT(*) AS total '
-            . $from
-            . $whereSql
-        );
-
-        $this->bindAll($count, $bindings);
-        $count->execute();
-
-        $row = $count->fetch(PDO::FETCH_ASSOC);
-
-        $total = is_array($row)
-            ? (int) ($row['total'] ?? 0)
-            : 0;
+        $total = null;
+        if (!$fast) {
+            $count = $this->prepare('SELECT COUNT(*) AS total ' . $from . $whereSql);
+            $this->bindAll($count, $bindings);
+            $count->execute();
+            $row = $count->fetch(PDO::FETCH_ASSOC);
+            $total = is_array($row) ? (int) ($row['total'] ?? 0) : 0;
+        }
 
         $dataBindings = $bindings;
 
         $dataBindings[':limit'] = [
-            $limit,
+            $fast ? $limit + 1 : $limit,
             PDO::PARAM_INT
         ];
 
@@ -691,9 +726,12 @@ final class WorkforceViewRepository
         $this->bindAll($data, $dataBindings);
         $data->execute();
 
+        $rows = $data->fetchAll(PDO::FETCH_ASSOC);
+        $hasNextPage = $fast && count($rows) > $limit;
         return [
-            'data' => $data->fetchAll(PDO::FETCH_ASSOC),
-            'total' => $total
+            'data' => $fast ? array_slice($rows, 0, $limit) : $rows,
+            'total' => $total,
+            'hasNextPage' => $fast ? $hasNextPage : (($page * $limit) < $total),
         ];
     }
 

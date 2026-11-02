@@ -83,35 +83,71 @@ final class ResigneeDirectoryRepository
         return ['sql' => 'WHERE ' . implode(' AND ', $where), 'values' => $values];
     }
 
-    /** @param array{search: string, account: string, accountIds: list<int>, accountMatchIds: list<int>, searchAccountIds: list<int>} $filters
-     * @return array{data: list<array<string, mixed>>, stats: array<string, int>, pagination: array<string, int>}
-     */
     /**
-     * Match the Attendance endpoint's 30-second MySQL SELECT execution limit.
-     * The cap is per statement (summary and page query), not a total HTTP deadline.
-     * Restore the original session value so other Kronos requests are unaffected.
+     * Keep the existing page response shape while allowing the new HRIS client
+     * to avoid calculating all four dashboard metrics on every page change.
+     * Legacy callers can omit $includeStats and retain the old behaviour.
+     *
+     * @param array<string, mixed> $filters
+     * @return array{data: array, stats: array<string, int>, pagination: array<string, int>}
      */
-    public function findPage(int $page, int $limit, array $filters): array
+    public function findPage(int $page, int $limit, array $filters, bool $includeStats = true): array
     {
-        $previous = (int) $this->pdo->query(
-            'SELECT @@SESSION.max_execution_time'
-        )->fetchColumn();
+        return $this->withSelectTimeLimit(function () use ($page, $limit, $filters, $includeStats): array {
+            $condition = self::buildConditions($filters);
+            $base = self::FROM_TABLES . $condition['sql'];
 
-        $this->pdo->exec('SET SESSION max_execution_time = 30000');
-        try {
-            return $this->findPageWithTimeLimit($page, $limit, $filters);
-        } finally {
-            $this->pdo->exec('SET SESSION max_execution_time = ' . $previous);
-        }
+            if ($includeStats) {
+                // Compatibility path for pre-update HRIS clients.
+                $stats = $this->queryStats($condition);
+            } else {
+                // Lightweight total only: pagination still needs an exact count.
+                $total = (int) $this->run('SELECT COUNT(*) ' . $base, $condition['values'])->fetchColumn();
+                $stats = ['total' => $total, 'thisMonth' => 0, 'last30Days' => 0, 'accounts' => 0];
+            }
+
+            $totalPages = max(1, (int) ceil($stats['total'] / $limit));
+            $page = min($page, $totalPages);
+            $offset = ($page - 1) * $limit;
+            $last = self::LAST_WORKING_DAY;
+            $sql = 'SELECT e.gy_emp_id AS employeeId, TRIM(e.gy_emp_code) AS sibsId, '
+                . 'e.gy_emp_fname AS firstName, e.gy_emp_mname AS middleName, '
+                . 'e.gy_emp_lname AS lastName, NULLIF(TRIM(u.gy_full_name), \'\') AS employeeName, '
+                . 'e.gy_acc_id AS accountId, e.gy_emp_account AS fallbackAccount, '
+                . 'e.gy_emp_hiredate AS hireDate, ' . $last . ' AS lastWorkingDate, '
+                . 'u.gy_user_status AS userStatus ' . $base
+                . ' ORDER BY ' . $last . ' DESC, e.gy_emp_id DESC LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+            $data = $this->run($sql, $condition['values'])->fetchAll(PDO::FETCH_ASSOC);
+            return [
+                'data' => $data,
+                'stats' => $stats,
+                'pagination' => [
+                    'currentPage' => $page,
+                    'totalPages' => $totalPages,
+                    'total' => $stats['total'],
+                    'limit' => $limit,
+                ],
+            ];
+        });
     }
 
-    /** @param array{search: string, account: string, accountIds: list<int>, accountMatchIds: list<int>, searchAccountIds: list<int>} $filters
-     * @return array{data: list<array<string, mixed>>, stats: array<string, int>, pagination: array<string, int>}
-     */
-    private function findPageWithTimeLimit(int $page, int $limit, array $filters): array
+    /** Read only the four metric counts; no employee rows are retrieved. */
+    public function findStats(array $filters): array
     {
-        $condition = self::buildConditions($filters);
-        $base = self::FROM_TABLES . $condition['sql'];
+        return $this->withSelectTimeLimit(function () use ($filters): array {
+            return $this->queryStats(self::buildConditions($filters));
+        });
+    }
+
+    /**
+     * One aggregate SELECT for all four values, rather than four independent
+     * potentially expensive scans or one scan repeated for every page.
+     *
+     * @param array{sql: string, values: array<string, mixed>} $condition
+     * @return array{total: int, thisMonth: int, last30Days: int, accounts: int}
+     */
+    private function queryStats(array $condition): array
+    {
         $last = self::LAST_WORKING_DAY;
         $today = self::MANILA_TODAY;
         $summary = 'SELECT COUNT(*) AS total, '
@@ -119,35 +155,26 @@ final class ResigneeDirectoryRepository
             . "COALESCE(SUM(CASE WHEN $last >= DATE_SUB($today, INTERVAL 29 DAY) THEN 1 ELSE 0 END), 0) AS last30Days, "
             . "COUNT(DISTINCT COALESCE(NULLIF(NULLIF(CONVERT(TRIM(CAST(e.gy_acc_id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci, ''), '0'), "
             . "NULLIF(CONVERT(TRIM(e.gy_emp_account) USING utf8mb4) COLLATE utf8mb4_unicode_ci, ''))) AS accounts "
-            . $base;
-        $statsRow = $this->run($summary, $condition['values'])->fetch(PDO::FETCH_ASSOC) ?: [];
-        $stats = [
-            'total' => (int) ($statsRow['total'] ?? 0),
-            'thisMonth' => (int) ($statsRow['thisMonth'] ?? 0),
-            'last30Days' => (int) ($statsRow['last30Days'] ?? 0),
-            'accounts' => (int) ($statsRow['accounts'] ?? 0),
-        ];
-        $totalPages = max(1, (int) ceil($stats['total'] / $limit));
-        $page = min($page, $totalPages);
-        $offset = ($page - 1) * $limit;
-        $sql = 'SELECT e.gy_emp_id AS employeeId, TRIM(e.gy_emp_code) AS sibsId, '
-            . 'e.gy_emp_fname AS firstName, e.gy_emp_mname AS middleName, '
-            . 'e.gy_emp_lname AS lastName, NULLIF(TRIM(u.gy_full_name), \'\') AS employeeName, '
-            . 'e.gy_acc_id AS accountId, e.gy_emp_account AS fallbackAccount, '
-            . 'e.gy_emp_hiredate AS hireDate, ' . $last . ' AS lastWorkingDate, '
-            . 'u.gy_user_status AS userStatus ' . $base
-            . ' ORDER BY ' . $last . ' DESC, e.gy_emp_id DESC LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
-        $data = $this->run($sql, $condition['values'])->fetchAll(PDO::FETCH_ASSOC);
+            . self::FROM_TABLES . $condition['sql'];
+        $row = $this->run($summary, $condition['values'])->fetch(PDO::FETCH_ASSOC) ?: [];
         return [
-            'data' => $data,
-            'stats' => $stats,
-            'pagination' => [
-                'currentPage' => $page,
-                'totalPages' => $totalPages,
-                'total' => $stats['total'],
-                'limit' => $limit,
-            ],
+            'total' => (int) ($row['total'] ?? 0),
+            'thisMonth' => (int) ($row['thisMonth'] ?? 0),
+            'last30Days' => (int) ($row['last30Days'] ?? 0),
+            'accounts' => (int) ($row['accounts'] ?? 0),
         ];
+    }
+
+    /** MySQL max_execution_time caps individual SELECT statements, not the full HTTP request. */
+    private function withSelectTimeLimit(callable $operation): mixed
+    {
+        $previous = (int) $this->pdo->query('SELECT @@SESSION.max_execution_time')->fetchColumn();
+        $this->pdo->exec('SET SESSION max_execution_time = 30000');
+        try {
+            return $operation();
+        } finally {
+            $this->pdo->exec('SET SESSION max_execution_time = ' . $previous);
+        }
     }
 
     /** @param array<string, mixed> $values */
